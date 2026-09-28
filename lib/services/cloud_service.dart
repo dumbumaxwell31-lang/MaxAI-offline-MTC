@@ -21,8 +21,6 @@ class CloudService extends GetxService {
         return _hive.getSetting(AppConstants.keyGoogleKey) ?? '';
       case 'kimi':
         return _hive.getSetting(AppConstants.keyKimiKey) ?? '';
-      case 'stability':
-        return _hive.getSetting(AppConstants.keyStabilityKey) ?? '';
       case 'nvidia':
         return _hive.getSetting(AppConstants.keyNvidiaKey) ?? '';
       case 'openrouter':
@@ -46,9 +44,6 @@ class CloudService extends GetxService {
             'gemini-2.5-flash';
       case 'kimi':
         return _hive.getSetting(AppConstants.keyKimiModel) ?? 'kimi-k2.6';
-      case 'stability':
-        return _hive.getSetting(AppConstants.keyStabilityModel) ??
-            'sd3.5-flash';
       case 'nvidia':
         return _hive.getSetting(AppConstants.keyNvidiaModel) ??
             'meta/llama-3.1-8b-instruct';
@@ -111,8 +106,6 @@ class CloudService extends GetxService {
               messages, imageBase64, temperature, maxTokens);
         case 'kimi':
           return await _sendKimi(messages, imageBase64, temperature, maxTokens);
-        case 'stability':
-          return await _sendStability(messages);
         case 'nvidia':
           return await _sendNvidia(
               messages, imageBase64, temperature, maxTokens);
@@ -640,44 +633,4 @@ class CloudService extends GetxService {
     return apiMessages;
   }
 
-  // ─── Stability AI (Image Generation) ────────────
-
-  Future<String> _sendStability(
-    List<Map<String, String>> messages,
-  ) async {
-    // Extract the latest user prompt for the image generation
-    final userMessages = messages.where((m) => m['role'] == 'user').toList();
-    if (userMessages.isEmpty) {
-      return 'ERROR: No user prompt found for image generation.';
-    }
-
-    final prompt = userMessages.last['content'] ?? '';
-
-    // Create a multipart request since stability AI v2beta uses multipart/form-data
-    var request = http.MultipartRequest(
-        'POST', Uri.parse(AppConstants.stabilityEndpoint));
-    request.headers.addAll({
-      'Authorization': 'Bearer $_apiKey',
-      'Accept': 'application/json',
-    });
-
-    request.fields['prompt'] = prompt;
-    request.fields['model'] = _model;
-    request.fields['output_format'] = 'jpeg';
-
-    final response = await request.send();
-    final responseBody = await response.stream.bytesToString();
-
-    if (response.statusCode != 200) {
-      return 'ERROR: Stability AI returned ${response.statusCode} — $responseBody';
-    }
-
-    final data = jsonDecode(responseBody);
-    final base64Image = data['image'];
-    if (base64Image != null) {
-      return '[IMAGE_BASE64]$base64Image';
-    }
-
-    return 'ERROR: No image generated.';
-  }
 }

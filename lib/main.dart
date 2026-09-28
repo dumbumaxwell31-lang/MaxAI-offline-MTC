@@ -1,29 +1,28 @@
 import 'dart:async';
 import 'dart:ui';
 
-import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:get/get.dart';
 import 'package:hive_flutter/hive_flutter.dart';
-// import 'firebase_options.dart';
 import 'controllers/settings_controller.dart';
 import 'controllers/cloud_model_controller.dart';
-import 'controllers/server_controller.dart';
 import 'controllers/model_controller.dart';
 import 'core/theme.dart';
-//////
+import 'core/app_identity.dart';
+import 'core/splash_artwork.dart';
 import 'core/routes.dart';
 import 'services/hive_service.dart';
 import 'services/inference_service.dart';
 import 'services/cloud_service.dart';
 import 'services/download_service.dart';
+import 'services/automatic_model_download_service.dart';
 import 'services/device_info_service.dart';
-import 'services/local_image_service.dart';
+import 'services/device_eligibility_service.dart';
+import 'services/model_selection_service.dart';
+import 'services/inference_resource_policy.dart';
 import 'services/app_log_service.dart';
 import 'services/crash_reporting_service.dart';
-import 'services/image_generation_notification_service.dart';
 import 'core/constants.dart';
 
 void main() {
@@ -44,23 +43,19 @@ void main() {
 
     appLog.info('App started');
 
-    // Initialize Firebase before any Firebase-dependent services
     try {
-      // await Firebase.initializeApp(
-      //   options: DefaultFirebaseOptions.currentPlatform,
-      // );
-    } catch (e) {
-      appLog.error('[Firebase] Initialization failed', details: e);
+      await SplashArtwork.preload();
+    } catch (error, stack) {
+      appLog.error('Could not preload launch artwork.',
+          details: '$error\n$stack');
     }
 
     // Support phones and tablets in portrait or landscape.
-    if (!kIsWeb) {
-      await SystemChrome.setPreferredOrientations([
-        DeviceOrientation.portraitUp,
-        DeviceOrientation.landscapeLeft,
-        DeviceOrientation.landscapeRight,
-      ]);
-    }
+    await SystemChrome.setPreferredOrientations([
+      DeviceOrientation.portraitUp,
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
 
     // Initialize Hive
     await Hive.initFlutter();
@@ -68,6 +63,9 @@ void main() {
     // Register global services
     await Get.putAsync(() => HiveService().init());
     await Get.putAsync(() => DeviceInfoService().init());
+    Get.put(DownloadService());
+    await Get.putAsync(() => DeviceEligibilityService().init());
+    await Get.putAsync(() => ModelSelectionService().init());
 
     // Settings controller must be initialized before runApp for theme support
     final settingsController = Get.put(SettingsController());
@@ -75,8 +73,7 @@ void main() {
 
     Get.put(InferenceService());
     Get.put(CloudService());
-    Get.put(DownloadService());
-    Get.put(LocalImageService());
+    await Get.putAsync(() => AutomaticModelDownloadService().init());
     final crashReporting =
         await Get.putAsync(() => CrashReportingService().init());
     FlutterError.onError = (details) {
@@ -95,10 +92,6 @@ void main() {
       crashReporting.recordFatal(error, stack, reason: 'platform_dispatcher');
       return true;
     };
-    final imageNotifications = Get.put(ImageGenerationNotificationService());
-    await imageNotifications.init();
-    await imageNotifications.configureBackgroundService();
-    Get.put(ServerController(), permanent: true);
     Get.put(ModelController());
 
     // Auto-configure inference settings based on device RAM
@@ -107,7 +100,7 @@ void main() {
     // Keep last model as a quick-load option, but do not auto-load on startup.
     _validateLastModel();
 
-    runApp(const PrivateLMApp());
+    runApp(const MaxAIApp());
 
     // Apply system UI after frame is rendered so Get.mediaQuery is available
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -145,54 +138,94 @@ void _validateLastModel() async {
   // Validate last text/LLM model
   final textModelName = hive.getSetting<String>(AppConstants.keyLocalModelName);
   final textModelPath = hive.getSetting<String>(AppConstants.keyLocalModelPath);
-  if (textModelName != null &&
+  final selectedModel = Get.find<ModelSelectionService>().selectedModel.value;
+  if (selectedModel != null &&
+      textModelName != null &&
       textModelName.isNotEmpty &&
       textModelPath != null &&
-      textModelPath.isNotEmpty) {
+      textModelPath.isNotEmpty &&
+      textModelName == selectedModel.filename) {
     if (!await downloadService.isModelDownloaded(textModelName)) {
       await hive.setSetting(AppConstants.keyLocalModelPath, '');
       await hive.setSetting(AppConstants.keyLocalModelName, '');
     }
   }
-
-  // Validate last image model
-  final imageModelName =
-      hive.getSetting<String>(AppConstants.keyImageModelName);
-  final imageModelPath =
-      hive.getSetting<String>(AppConstants.keyImageModelPath);
-  if (imageModelName != null &&
-      imageModelName.isNotEmpty &&
-      imageModelPath != null &&
-      imageModelPath.isNotEmpty) {
-    if (!await downloadService.isModelDownloaded(imageModelName)) {
-      await hive.setSetting(AppConstants.keyImageModelPath, '');
-      await hive.setSetting(AppConstants.keyImageModelName, '');
-    }
-  }
 }
 
-/// Auto-set optimized inference params based on device RAM (only on first launch).
+/// Applies the RAM profile on first launch and migrates untouched legacy defaults.
 void _autoConfigureForDevice() {
   final hive = Get.find<HiveService>();
   final device = Get.find<DeviceInfoService>();
+  final selected = Get.find<ModelSelectionService>().selectedModel.value;
 
-  // Only auto-configure if user hasn't already set values (first launch)
   final hasConfigured =
       hive.getSetting<bool>('device_auto_configured') ?? false;
-  if (hasConfigured) return;
+  final hasManualLimits = hive.getSetting<bool>(
+        AppConstants.keyInferenceLimitsManuallyConfigured,
+      ) ??
+      false;
+  if (hasConfigured) {
+    final isPro =
+        selected?.identifier == AutomaticModelPolicy.maxAiPro.identifier;
+    final legacyContextSize = isPro ? 2048 : 1024;
+    final legacyMaxTokens = isPro ? 512 : 256;
+    final savedContextSize = hive.getSetting<int>(AppConstants.keyContextSize);
+    final savedMaxTokens = hive.getSetting<int>(AppConstants.keyMaxTokens);
+    if (selected != null &&
+        !hasManualLimits &&
+        savedContextSize == legacyContextSize &&
+        savedMaxTokens == legacyMaxTokens) {
+      final limits = InferenceResourcePolicy.forAvailableRam(
+        availableRamGb: device.hasAvailableRamMeasurement.value
+            ? device.availableRamGB.value
+            : null,
+        modelContextLimit: selected.maxContextSize,
+        modelOutputLimit: selected.maxOutputTokens,
+      );
+      final increasesLimits = limits.contextSize >= legacyContextSize &&
+          limits.maxOutputTokens >= legacyMaxTokens &&
+          (limits.contextSize > legacyContextSize ||
+              limits.maxOutputTokens > legacyMaxTokens);
+      if (increasesLimits) {
+        hive.setSetting(AppConstants.keyContextSize, limits.contextSize);
+        hive.setSetting(AppConstants.keyMaxTokens, limits.maxOutputTokens);
+        final settings = Get.find<SettingsController>();
+        settings.contextSize.value = limits.contextSize;
+        settings.maxTokens.value = limits.maxOutputTokens;
+        Get.find<AppLogService>().info(
+          '[AutoConfig] Migrated untouched legacy inference limits to '
+          'context=${limits.contextSize}, maxTokens=${limits.maxOutputTokens}',
+        );
+      }
+    }
+    return;
+  }
 
-  hive.setSetting(AppConstants.keyContextSize, device.recommendedContextSize);
-  hive.setSetting(AppConstants.keyMaxTokens, device.recommendedMaxTokens);
-  hive.setSetting(AppConstants.keyTemperature, 0.3);
+  final model = selected ?? AutomaticModelPolicy.maxAiLite;
+  final limits = InferenceResourcePolicy.forAvailableRam(
+    availableRamGb: device.hasAvailableRamMeasurement.value
+        ? device.availableRamGB.value
+        : null,
+    modelContextLimit: model.maxContextSize,
+    modelOutputLimit: model.maxOutputTokens,
+  );
+  final contextSize = limits.contextSize;
+  final maxTokens = limits.maxOutputTokens;
+  hive.setSetting(AppConstants.keyContextSize, contextSize);
+  hive.setSetting(AppConstants.keyMaxTokens, maxTokens);
+  hive.setSetting(AppConstants.keyTemperature, 0.7);
   hive.setSetting('device_auto_configured', true);
+  final settings = Get.find<SettingsController>();
+  settings.contextSize.value = contextSize;
+  settings.maxTokens.value = maxTokens;
 
-  Get.find<AppLogService>().info(
-      '[AutoConfig] Set context=${device.recommendedContextSize}, '
-      'maxTokens=${device.recommendedMaxTokens} for ${device.totalRamGB.value.toStringAsFixed(1)}GB RAM');
+  Get.find<AppLogService>()
+      .info('[AutoConfig] Set context=$contextSize, maxTokens=$maxTokens for '
+          '${device.totalRamGB.value.toStringAsFixed(1)}GB RAM');
 }
 
-class PrivateLMApp extends StatelessWidget {
-  const PrivateLMApp({super.key});
+class MaxAIApp extends StatelessWidget {
+  const MaxAIApp({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -201,12 +234,12 @@ class PrivateLMApp extends StatelessWidget {
       final themeMode = settings.themeMode.value;
       final scale = settings.fontScale.value; // read here → Obx tracks it
       return GetMaterialApp(
-        title: 'PrivateLM',
+        title: AppIdentity.name,
         debugShowCheckedModeBanner: false,
         theme: AppTheme.lightTheme,
         darkTheme: AppTheme.darkTheme,
         themeMode: themeMode,
-        initialRoute: AppRoutes.home,
+        initialRoute: AppRoutes.splash,
         getPages: AppPages.pages,
         builder: (ctx, child) => MediaQuery(
           data: MediaQuery.of(ctx).copyWith(

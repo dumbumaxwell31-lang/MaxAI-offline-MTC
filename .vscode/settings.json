@@ -1,3 +1,4 @@
 {
-    "git.autoRepositoryDetection": false
+    "git.autoRepositoryDetection": false,
+    "java.configuration.updateBuildConfiguration": "automatic"
 }

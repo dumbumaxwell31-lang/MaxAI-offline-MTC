@@ -1,19 +1,18 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../models/chat_message.dart';
 import '../utils/thought_parser.dart';
 import 'attachment_preview.dart';
 import 'image_viewer.dart';
-import 'thought_disclosure.dart';
 
 class ChatBubble extends StatelessWidget {
   final ChatMessage message;
 
   const ChatBubble({super.key, required this.message});
 
-  // ── Apple-style colors ──
+  // Message colors
   static const _appleBlue = Color(0xFF007AFF);
   static const _appleBlueDark = Color(0xFF0A84FF);
 
@@ -55,7 +54,8 @@ class ChatBubble extends StatelessWidget {
                 Padding(
                   padding: const EdgeInsets.only(bottom: 10),
                   child: GestureDetector(
-                    onTap: () => ImageViewer.show(context, message.imageBase64!),
+                    onTap: () =>
+                        ImageViewer.show(context, message.imageBase64!),
                     child: ClipRRect(
                       borderRadius: BorderRadius.circular(14),
                       child: Image.memory(
@@ -65,7 +65,6 @@ class ChatBubble extends StatelessWidget {
                         fit: BoxFit.cover,
                         gaplessPlayback: true,
                         errorBuilder: (_, __, ___) => Container(
-
                           height: 100,
                           decoration: BoxDecoration(
                             color: isDark
@@ -73,19 +72,13 @@ class ChatBubble extends StatelessWidget {
                                 : Colors.black.withValues(alpha: 0.05),
                             borderRadius: BorderRadius.circular(14),
                           ),
-                          child: const Center(child: Icon(Icons.broken_image_rounded, size: 28)),
+                          child: const Center(
+                              child:
+                                  Icon(Icons.broken_image_rounded, size: 28)),
                         ),
                       ),
                     ),
                   ),
-                ),
-
-              // Thought disclosure
-              if (!isUser && thoughtParts.hasThought)
-                ThoughtDisclosure(
-                  thought: thoughtParts.thought,
-                  durationSeconds: message.thoughtDurationSeconds,
-                  styleSheet: _thoughtMarkdownStyle(context),
                 ),
 
               // Message content
@@ -133,21 +126,9 @@ class ChatBubble extends StatelessWidget {
                           fontSize: 10,
                           color: isUser
                               ? Colors.white.withValues(alpha: 0.55)
-                              : Theme.of(context).hintColor.withValues(alpha: 0.5),
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ),
-                  if (message.imageGenDurationMs != null && message.imageGenDurationMs! > 0)
-                    Padding(
-                      padding: const EdgeInsets.only(right: 8),
-                      child: Text(
-                        _formatGenTime(message.imageGenDurationMs!),
-                        style: GoogleFonts.inter(
-                          fontSize: 10,
-                          color: isUser
-                              ? Colors.white.withValues(alpha: 0.55)
-                              : Theme.of(context).hintColor.withValues(alpha: 0.5),
+                              : Theme.of(context)
+                                  .hintColor
+                                  .withValues(alpha: 0.5),
                           fontWeight: FontWeight.w500,
                         ),
                       ),
@@ -162,6 +143,22 @@ class ChatBubble extends StatelessWidget {
                       fontWeight: FontWeight.w400,
                     ),
                   ),
+                  if (!isUser && answerContent.isNotEmpty) ...[
+                    const SizedBox(width: 2),
+                    IconButton(
+                      tooltip: 'Copy response',
+                      onPressed: () => _copyResponse(context, answerContent),
+                      icon: Icon(
+                        Icons.copy_rounded,
+                        size: 14,
+                        color: Theme.of(context).hintColor.withValues(alpha: 0.6),
+                      ),
+                      padding: EdgeInsets.zero,
+                      constraints:
+                          const BoxConstraints.tightFor(width: 28, height: 28),
+                      visualDensity: VisualDensity.compact,
+                    ),
+                  ],
                 ],
               ),
             ],
@@ -182,7 +179,8 @@ class ChatBubble extends StatelessWidget {
     final color = Theme.of(context).colorScheme.onSurface;
     final muted = Theme.of(context).hintColor;
     final base = GoogleFonts.inter(fontSize: 15, color: color, height: 1.5);
-    final codeBlockBg = isDark ? const Color(0xFF2C2C2E) : const Color(0xFFE5E5EA);
+    final codeBlockBg =
+        isDark ? const Color(0xFF2C2C2E) : const Color(0xFFE5E5EA);
 
     return MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
       p: base,
@@ -203,34 +201,14 @@ class ChatBubble extends StatelessWidget {
       blockquoteDecoration: BoxDecoration(
         border: Border(
           left: BorderSide(
-            color: isDark ? Colors.white.withValues(alpha: 0.15) : Colors.black.withValues(alpha: 0.15),
+            color: isDark
+                ? Colors.white.withValues(alpha: 0.15)
+                : Colors.black.withValues(alpha: 0.15),
             width: 3,
           ),
         ),
       ),
       blockquotePadding: const EdgeInsets.only(left: 14, top: 2, bottom: 2),
-    );
-  }
-
-  MarkdownStyleSheet _thoughtMarkdownStyle(BuildContext context) {
-    final muted = Theme.of(context).hintColor;
-    final base = GoogleFonts.inter(fontSize: 13, color: muted, height: 1.4);
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-
-    return MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
-      p: base,
-      strong: base.copyWith(fontWeight: FontWeight.w600),
-      em: base.copyWith(fontStyle: FontStyle.italic),
-      listBullet: base,
-      code: GoogleFonts.firaCode(
-        fontSize: 11,
-        color: muted,
-        backgroundColor: isDark ? const Color(0xFF2C2C2E) : const Color(0xFFE5E5EA),
-      ),
-      codeblockDecoration: BoxDecoration(
-        color: isDark ? const Color(0xFF2C2C2E) : const Color(0xFFE5E5EA),
-        borderRadius: BorderRadius.circular(10),
-      ),
     );
   }
 
@@ -240,12 +218,20 @@ class ChatBubble extends StatelessWidget {
     return '$h:$m';
   }
 
-  String _formatGenTime(int ms) {
-    if (ms < 1000) return '${ms}ms';
-    if (ms < 60000) return '${(ms / 1000).toStringAsFixed(1)}s';
-    final m = ms ~/ 60000;
-    final s = (ms % 60000) ~/ 1000;
-    return s > 0 ? '${m}m ${s}s' : '${m}m';
+  Future<void> _copyResponse(BuildContext context, String text) async {
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    try {
+      await Clipboard.setData(ClipboardData(text: text));
+      if (!context.mounted) return;
+      messenger?.showSnackBar(
+        const SnackBar(content: Text('Response copied')),
+      );
+    } catch (_) {
+      if (!context.mounted) return;
+      messenger?.showSnackBar(
+        const SnackBar(content: Text('Could not copy response')),
+      );
+    }
   }
 
   String _cleanAssistantText(String text) {

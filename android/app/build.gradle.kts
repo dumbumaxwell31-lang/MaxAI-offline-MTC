@@ -15,7 +15,7 @@ if (hasReleaseKeystore) {
     FileInputStream(keystorePropertiesFile).use { keystoreProperties.load(it) }
 }
 val allowDebugReleaseSigning =
-    System.getenv("PRIVATELM_ALLOW_DEBUG_RELEASE_SIGNING") == "true"
+    System.getenv("MAXAI_ALLOW_DEBUG_RELEASE_SIGNING") == "true"
 val isReleaseBuild = gradle.startParameter.taskNames.any {
     it.contains("release", ignoreCase = true)
 }
@@ -26,15 +26,10 @@ if (isReleaseBuild && !hasReleaseKeystore && !allowDebugReleaseSigning) {
     )
 }
 
-if (file("google-services.json").exists()) {
-    apply(plugin = "com.google.gms.google-services")
-    apply(plugin = "com.google.firebase.crashlytics")
-}
-
 android {
     namespace = "com.orailnoor.privatelm"
     compileSdk = flutter.compileSdkVersion
-    ndkVersion = flutter.ndkVersion
+    ndkVersion = "28.2.13676358"
 
     compileOptions {
         isCoreLibraryDesugaringEnabled = true
@@ -48,7 +43,7 @@ android {
 
     defaultConfig {
         applicationId = "com.orailnoor.privatelm"
-        minSdk = 28
+        minSdk = 26
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName

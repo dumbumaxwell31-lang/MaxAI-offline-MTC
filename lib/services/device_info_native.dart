@@ -1,10 +1,8 @@
 import 'dart:io';
 
-import 'package:llama_flutter_android/llama_flutter_android.dart';
 
 /// Detected SoC family.
 enum SocFamily {
-  apple,
   snapdragon,
   mediatek,
   exynos,
@@ -18,8 +16,6 @@ enum SocFamily {
 extension SocFamilyExt on SocFamily {
   String get displayName {
     switch (this) {
-      case SocFamily.apple:
-        return 'Apple Silicon';
       case SocFamily.snapdragon:
         return 'Qualcomm Snapdragon';
       case SocFamily.mediatek:
@@ -41,8 +37,6 @@ extension SocFamilyExt on SocFamily {
 
   String get recommendedQuant {
     switch (this) {
-      case SocFamily.apple:
-        return 'Q4_K_M (safe default) · Q5_K_M for quality';
       case SocFamily.snapdragon:
         return 'Q4_K_M (recommended) · Q4_0_4_8 on X Elite';
       case SocFamily.mediatek:
@@ -77,8 +71,7 @@ SocFamily _detectSocFamily(String cpuinfo, String hardware) {
   final hwLower = hardware.toLowerCase();
 
   // Google Tensor (Pixel 6/7/8/9)
-  if (RegExp(r'gs\d{3}').hasMatch(hwLower) ||
-      lower.contains('google tensor')) {
+  if (RegExp(r'gs\d{3}').hasMatch(hwLower) || lower.contains('google tensor')) {
     return SocFamily.googleTensor;
   }
 
@@ -124,31 +117,28 @@ SocFamily _detectSocFamily(String cpuinfo, String hardware) {
     return SocFamily.hisilicon;
   }
 
-  // Apple (iOS path doesn't hit this, but keep for completeness)
-  if (lower.contains('apple')) {
-    return SocFamily.apple;
-  }
-
   return SocFamily.unknown;
 }
 
-/// Native (Android/iOS/macOS/Linux) device info implementation.
+/// Android device information implementation.
 Future<Map<String, dynamic>> getDeviceInfo() async {
-  double totalRam = 4.0;
-  double availableRam = 2.0;
+  double? totalRam;
+  double? availableRam;
+  var hasAvailableRamMeasurement = false;
   SocFamily socFamily = SocFamily.unknown;
   String hardware = '';
 
   try {
-    if (Platform.isAndroid || Platform.isLinux) {
+    if (Platform.isAndroid) {
       final meminfo = await File('/proc/meminfo').readAsString();
       final totalMatch = RegExp(r'MemTotal:\s+(\d+)').firstMatch(meminfo);
+      final availMatch = RegExp(r'MemAvailable:\s+(\d+)').firstMatch(meminfo);
       if (totalMatch != null) {
         totalRam = int.parse(totalMatch.group(1)!) / 1024 / 1024;
       }
-      final availMatch = RegExp(r'MemAvailable:\s+(\d+)').firstMatch(meminfo);
       if (availMatch != null) {
         availableRam = int.parse(availMatch.group(1)!) / 1024 / 1024;
+        hasAvailableRamMeasurement = availableRam >= 0;
       }
 
       // Detect SoC family from /proc/cpuinfo
@@ -161,16 +151,6 @@ Future<Map<String, dynamic>> getDeviceInfo() async {
             '';
         socFamily = _detectSocFamily(cpuinfo, hardware);
       } catch (_) {}
-    } else if (Platform.isIOS) {
-      final plugin = LlamaHostApi();
-      final gpuInfo = await plugin.detectGpu();
-      totalRam = gpuInfo.deviceLocalMemoryBytes / (1024 * 1024 * 1024);
-      availableRam = gpuInfo.freeRamBytes / (1024 * 1024 * 1024);
-      socFamily = SocFamily.apple;
-    } else if (Platform.isMacOS) {
-      totalRam = 16.0;
-      availableRam = 8.0;
-      socFamily = SocFamily.apple;
     }
   } catch (e) {
     print('[DeviceInfo] Failed to read device info: $e');
@@ -179,6 +159,7 @@ Future<Map<String, dynamic>> getDeviceInfo() async {
   return {
     'totalRamGB': totalRam,
     'availableRamGB': availableRam,
+    'hasAvailableRamMeasurement': hasAvailableRamMeasurement,
     'isTensorSoC': socFamily == SocFamily.googleTensor ? 1.0 : 0.0,
     'socFamily': socFamily.index,
     'socHardware': hardware,

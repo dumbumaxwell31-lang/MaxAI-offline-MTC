@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
@@ -7,16 +6,17 @@ import 'package:google_fonts/google_fonts.dart';
 import '../controllers/chat_controller.dart';
 import '../controllers/settings_controller.dart';
 import '../controllers/model_controller.dart';
-import '../controllers/home_controller.dart';
+import '../core/app_identity.dart';
+import '../core/routes.dart';
+import '../services/automatic_model_download_service.dart';
 import '../services/inference_service.dart';
-import '../services/local_image_service.dart';
-import '../ffi/sd_ffi_bindings.dart';
+import '../services/local_chat_availability.dart';
+import '../services/model_selection_service.dart';
 import '../utils/thought_parser.dart';
 import '../widgets/attachment_preview.dart';
 import '../widgets/chat_bubble.dart';
-import '../widgets/thought_disclosure.dart';
 
-// ── Apple-style color helpers ──
+// Shared color helpers
 Color _appleBlue(BuildContext c) => Theme.of(c).brightness == Brightness.dark
     ? const Color(0xFF0A84FF)
     : const Color(0xFF007AFF);
@@ -44,18 +44,19 @@ class ChatView extends GetView<ChatController> {
           _contextBar(context, isDark),
           Expanded(child: Obx(() {
             if (controller.currentSessionId.value.isEmpty ||
-                controller.messages.isEmpty)
+                controller.messages.isEmpty) {
               return _emptyState(context, isDark);
+            }
             final streaming = controller.isStreaming.value;
-            final text = controller.streamingResponse.value;
             final n = controller.messages.length;
             return NotificationListener<ScrollUpdateNotification>(
               onNotification: (note) {
                 if (note.dragDetails != null && streaming) {
-                  if ((note.scrollDelta ?? 0) < 0)
+                  if ((note.scrollDelta ?? 0) < 0) {
                     controller.pauseStreamingFollow();
-                  else
+                  } else {
                     controller.resumeStreamingFollowIfNearBottom();
+                  }
                 }
                 return false;
               },
@@ -65,7 +66,8 @@ class ChatView extends GetView<ChatController> {
                 itemCount: n + (streaming ? 1 : 0),
                 itemBuilder: (_, i) {
                   if (i == n && streaming) {
-                    return _streamBubble(context, text, isDark);
+                    return Obx(() => _streamBubble(
+                        context, controller.streamingResponse.value, isDark));
                   }
                   return ChatBubble(message: controller.messages[i]);
                 },
@@ -96,17 +98,10 @@ class ChatView extends GetView<ChatController> {
         final isLocal = settings.inferenceMode.value == 'local';
         String model;
         if (isLocal) {
-          final localImage = Get.find<LocalImageService>();
           if (inf.isModelLoaded.value) {
-            model = inf.loadedModelName.value
-                .replaceAll('.gguf', '')
-                .replaceAll('.GGUF', '');
-          } else if (localImage.isModelLoaded.value) {
-            final backend = localImage.currentBackend.value;
-            final backendEmoji = backend == Backend.cpu ? '🖥' : '⚡';
-            final backendName = backend.displayName.split(' ').first;
-            model =
-                '$backendEmoji $backendName · ${localImage.loadedModelName.value.replaceAll('.gguf', '').replaceAll('.GGUF', '')}';
+            model = AutomaticModelPolicy.displayNameForFilename(
+              inf.loadedModelName.value,
+            );
           } else {
             model = 'No model loaded';
           }
@@ -119,20 +114,19 @@ class ChatView extends GetView<ChatController> {
                   ? settings.anthropicModel.value
                   : p == 'google'
                       ? settings.googleModel.value
-                      : p == 'stability'
-                          ? settings.stabilityModel.value
-                          : p == 'nvidia'
-                              ? settings.nvidiaModel.value
-                              : p == 'openrouter'
-                                  ? settings.openRouterModel.value
-                                  : p == 'custom'
-                                      ? settings.customCloudModel.value
-                                      : settings.kimiModel.value;
-          if (p == 'custom' && model.isNotEmpty)
+                      : p == 'nvidia'
+                          ? settings.nvidiaModel.value
+                          : p == 'openrouter'
+                              ? settings.openRouterModel.value
+                              : p == 'custom'
+                                  ? settings.customCloudModel.value
+                                  : settings.kimiModel.value;
+          if (p == 'custom' && model.isNotEmpty) {
             model = '${settings.customCloudName.value}: $model';
+          }
         }
         final title = sid.isEmpty
-            ? 'PrivateLM'
+            ? AppIdentity.name
             : controller.sessions.firstWhereOrNull((s) => s.id == sid)?.title ??
                 'Chat';
         return Padding(
@@ -180,13 +174,10 @@ class ChatView extends GetView<ChatController> {
       }),
       actions: [
         IconButton(
+            tooltip: 'Chat history',
             icon: Icon(Icons.history_rounded,
                 size: 20, color: Theme.of(context).hintColor),
             onPressed: () => _showHistory(context)),
-        IconButton(
-            tooltip: 'New Chat',
-            icon: Icon(Icons.edit_note, size: 22, color: _appleBlue(context)),
-            onPressed: () => controller.createNewChat()),
       ],
     );
   }
@@ -235,8 +226,9 @@ class ChatView extends GetView<ChatController> {
       final inf = Get.find<InferenceService>();
       final active = controller.currentSessionId.value.isNotEmpty &&
           controller.messages.isNotEmpty;
-      if (!active || settings.inferenceMode.value != 'local')
+      if (!active || settings.inferenceMode.value != 'local') {
         return const SizedBox.shrink();
+      }
       final total = inf.contextTokensTotal.value > 0
           ? inf.contextTokensTotal.value
           : settings.contextSize.value;
@@ -314,7 +306,21 @@ class ChatView extends GetView<ChatController> {
         Obx(() {
           final settings = Get.find<SettingsController>();
           final models = Get.find<ModelController>();
+          final automaticDownloads = Get.find<AutomaticModelDownloadService>();
+          final inference = Get.find<InferenceService>();
           final isLocal = settings.inferenceMode.value == 'local';
+          if (isLocal &&
+              !LocalChatAvailability.canSend(
+                inferenceMode: settings.inferenceMode.value,
+                isModelLoaded: inference.isModelLoaded.value,
+              )) {
+            return _localModelStatus(
+              context,
+              isDark,
+              models,
+              automaticDownloads,
+            );
+          }
           if (isLocal && models.downloadedCount == 0) {
             return Container(
               padding: const EdgeInsets.all(20),
@@ -339,9 +345,9 @@ class ChatView extends GetView<ChatController> {
                         fontSize: 14, color: Theme.of(context).hintColor)),
                 const SizedBox(height: 20),
                 FilledButton.icon(
-                  onPressed: () => Get.find<HomeController>().changeTab(1),
+                  onPressed: () => Get.toNamed(AppRoutes.models),
                   icon: const Icon(Icons.arrow_downward_rounded, size: 18),
-                  label: const Text('Go to Models'),
+                  label: const Text('Set up Local AI'),
                   style: FilledButton.styleFrom(
                       backgroundColor: const Color(0xFFFF9500),
                       foregroundColor: Colors.white,
@@ -364,6 +370,54 @@ class ChatView extends GetView<ChatController> {
         }),
       ]),
     ));
+  }
+
+  Widget _localModelStatus(
+    BuildContext context,
+    bool isDark,
+    ModelController models,
+    AutomaticModelDownloadService automaticDownloads,
+  ) {
+    final selected = automaticDownloads.selectedModel;
+    final ready = automaticDownloads.isReady && selected != null;
+    final title = ready ? 'Local Model Ready' : 'Preparing Local AI';
+    final message = ready
+        ? '${selected.name} is ready. Load it to start chatting offline.'
+        : automaticDownloads.statusMessage.value;
+
+    return Column(mainAxisSize: MainAxisSize.min, children: [
+      Icon(
+        ready ? Icons.memory_rounded : Icons.download_for_offline_outlined,
+        color: ready ? _appleBlue(context) : const Color(0xFFFF9500),
+        size: 36,
+      ),
+      const SizedBox(height: 14),
+      Text(
+        title,
+        style: GoogleFonts.inter(
+          fontSize: 18,
+          fontWeight: FontWeight.w600,
+          color: isDark ? Colors.white : Colors.black,
+        ),
+      ),
+      const SizedBox(height: 6),
+      Text(
+        message,
+        textAlign: TextAlign.center,
+        style: GoogleFonts.inter(
+          fontSize: 14,
+          color: Theme.of(context).hintColor,
+        ),
+      ),
+      const SizedBox(height: 20),
+      FilledButton.icon(
+        onPressed: ready
+            ? () => models.loadModel(selected.filename)
+            : () => Get.toNamed(AppRoutes.models),
+        icon: Icon(ready ? Icons.play_arrow_rounded : Icons.info_outline),
+        label: Text(ready ? 'Load Model' : 'View Model Status'),
+      ),
+    ]);
   }
 
   Widget _suggestionChip(BuildContext context, String text, bool isDark) {
@@ -399,7 +453,6 @@ class ChatView extends GetView<ChatController> {
   // ── Streaming Bubble ──
   Widget _streamBubble(BuildContext context, String text, bool isDark) {
     final attType = controller.streamingAttachmentType.value;
-    final isImageGen = controller.imageGenTotal.value > 0;
     final clean = _cleanStream(text).trimLeft();
     final parts = splitThoughtTags(clean);
     final answer = parts.answer.trimLeft();
@@ -423,31 +476,22 @@ class ChatView extends GetView<ChatController> {
           ),
           child:
               Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            if (isImageGen)
-              _ImageGenIndicator(controller: controller, isDark: isDark)
-            else if (!hasText)
+            if (!hasText)
               _typingHint(context, isDark, attachmentType: attType)
             else ...[
-              if (parts.hasThought)
-                ThoughtDisclosure(
-                    thought: parts.thought,
-                    isThinking: parts.isThinking,
-                    styleSheet: _thoughtMd(context, isDark)),
               if (_hasPrintable(answer))
                 Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
                   Expanded(
-                      child: MarkdownBody(
-                          data: answer,
-                          selectable: true,
-                          styleSheet: _streamMd(context, isDark))),
+                      child: Text(answer, style: _streamMd(context, isDark).p)),
                   _BlinkingCursor(color: Theme.of(context).hintColor),
                 ]),
             ],
-            if (hasText && !isImageGen)
+            if (hasText)
               Obx(() {
                 final inf = Get.find<InferenceService>();
-                if (inf.tokensPerSecond.value <= 0)
+                if (inf.tokensPerSecond.value <= 0) {
                   return const SizedBox.shrink();
+                }
                 return Padding(
                     padding: const EdgeInsets.only(top: 8),
                     child: Text(
@@ -540,108 +584,12 @@ class ChatView extends GetView<ChatController> {
                 ),
               );
             }),
-            Obx(() {
-              final settings = Get.find<SettingsController>();
-              final localImage = Get.find<LocalImageService>();
-              if (settings.inferenceMode.value != 'local' ||
-                  !localImage.isModelLoaded.value) {
-                return const SizedBox.shrink();
-              }
-              final steps = settings.imageSteps.value;
-              final size = settings.imageGenSize.value;
-              final sizeLabel = size == 0 ? 'Auto' : '${size}px';
-              final backend = localImage.currentBackend.value;
-              final backendLabel = backend == Backend.cpu
-                  ? 'CPU'
-                  : backend.displayName.split(' ').first.toUpperCase();
-              final accent = backend == Backend.cpu
-                  ? const Color(0xFFFF9500)
-                  : const Color(0xFF34C759);
-              return Padding(
-                padding: const EdgeInsets.fromLTRB(4, 0, 4, 8),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: accent.withValues(alpha: 0.10),
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(
-                            color: accent.withValues(alpha: 0.24),
-                            width: 0.5,
-                          ),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.auto_awesome_rounded,
-                                size: 13, color: accent),
-                            const SizedBox(width: 6),
-                            Flexible(
-                              child: Text(
-                                'Image gen · $steps ${steps == 1 ? "step" : "steps"} · $sizeLabel · $backendLabel',
-                                overflow: TextOverflow.ellipsis,
-                                style: GoogleFonts.inter(
-                                  fontSize: 11,
-                                  color: accent,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Container(
-                      height: 30,
-                      decoration: BoxDecoration(
-                        color: isDark
-                            ? Colors.white.withValues(alpha: 0.06)
-                            : Colors.black.withValues(alpha: 0.04),
-                        borderRadius: BorderRadius.circular(15),
-                        border: Border.all(color: _sep(context), width: 0.5),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          _StepButton(
-                            icon: Icons.remove_rounded,
-                            enabled: steps > 1,
-                            onTap: () => settings.setImageSteps(steps - 1),
-                          ),
-                          Text(
-                            steps.toString(),
-                            style: GoogleFonts.inter(
-                              fontSize: 12,
-                              color: isDark ? Colors.white : Colors.black,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                          _StepButton(
-                            icon: Icons.add_rounded,
-                            enabled: steps < 20,
-                            onTap: () => settings.setImageSteps(steps + 1),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            }),
             Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
               // Attach button (image + file) — shown for cloud & local vision
               Obx(() {
                 final s = Get.find<SettingsController>();
-                final inf = Get.find<InferenceService>();
                 final isCloud = s.inferenceMode.value == 'cloud';
-                final isLocalVision = s.inferenceMode.value == 'local' &&
-                    inf.loadedModelRuntime.value == 'litert' &&
-                    inf.isVisionLoaded.value;
-                if (!isCloud && !isLocalVision) return const SizedBox.shrink();
+                if (!isCloud) return const SizedBox.shrink();
                 return _AttachButton(
                   isDark: isDark,
                   isCloud: isCloud,
@@ -651,39 +599,54 @@ class ChatView extends GetView<ChatController> {
                 );
               }),
               // Text field
-              Expanded(
-                  child: Container(
-                decoration: BoxDecoration(
-                  color: isDark
-                      ? const Color(0xFF1C1C1E)
-                      : const Color(0xFFF2F2F7),
-                  borderRadius: BorderRadius.circular(22),
-                ),
-                child: TextField(
-                  controller: controller.textController,
-                  onChanged: (v) => controller.inputText.value = v,
-                  maxLines: 5,
-                  minLines: 1,
-                  style: GoogleFonts.inter(
-                      fontSize: 15,
-                      color: isDark ? Colors.white : Colors.black),
-                  decoration: InputDecoration(
-                    hintText: 'Message…',
-                    hintStyle: GoogleFonts.inter(
-                        fontSize: 15, color: Theme.of(context).hintColor),
-                    border: InputBorder.none,
-                    contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 18, vertical: 10),
-                    isDense: true,
+              Expanded(child: Obx(() {
+                final settings = Get.find<SettingsController>();
+                final canChat = LocalChatAvailability.canSend(
+                  inferenceMode: settings.inferenceMode.value,
+                  isModelLoaded:
+                      Get.find<InferenceService>().isModelLoaded.value,
+                );
+                return Container(
+                  decoration: BoxDecoration(
+                    color: isDark
+                        ? const Color(0xFF1C1C1E)
+                        : const Color(0xFFF2F2F7),
+                    borderRadius: BorderRadius.circular(22),
                   ),
-                  onSubmitted: (_) => controller.sendMessage(),
-                ),
-              )),
+                  child: TextField(
+                    controller: controller.textController,
+                    enabled: canChat,
+                    onChanged: (v) => controller.inputText.value = v,
+                    maxLines: 5,
+                    minLines: 1,
+                    style: GoogleFonts.inter(
+                        fontSize: 15,
+                        color: isDark ? Colors.white : Colors.black),
+                    decoration: InputDecoration(
+                      hintText: 'Message…',
+                      hintStyle: GoogleFonts.inter(
+                          fontSize: 15, color: Theme.of(context).hintColor),
+                      border: InputBorder.none,
+                      contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 18, vertical: 10),
+                      isDense: true,
+                    ),
+                    onSubmitted:
+                        canChat ? (_) => controller.sendMessage() : null,
+                  ),
+                );
+              })),
               const SizedBox(width: 6),
               // Unified mic / send / stop button
               Obx(() {
                 final loading = controller.isLoading.value;
                 final listening = controller.isListening.value;
+                final settings = Get.find<SettingsController>();
+                final canChat = LocalChatAvailability.canSend(
+                  inferenceMode: settings.inferenceMode.value,
+                  isModelLoaded:
+                      Get.find<InferenceService>().isModelLoaded.value,
+                );
                 final hasContent = controller.inputText.value.isNotEmpty ||
                     controller.selectedFileName.value != null ||
                     controller.selectedImagePath.value != null;
@@ -693,7 +656,13 @@ class ChatView extends GetView<ChatController> {
                 final IconData iconData;
                 final VoidCallback? onTap;
 
-                if (loading) {
+                if (!canChat) {
+                  bgColor = isDark
+                      ? Colors.white.withValues(alpha: 0.08)
+                      : Colors.black.withValues(alpha: 0.06);
+                  iconData = Icons.memory_outlined;
+                  onTap = () => Get.toNamed(AppRoutes.models);
+                } else if (loading) {
                   // AI generating → red stop
                   bgColor = const Color(0xFFFF3B30);
                   iconData = Icons.stop_rounded;
@@ -732,9 +701,10 @@ class ChatView extends GetView<ChatController> {
                           ScaleTransition(scale: anim, child: child),
                       child: Icon(iconData,
                           key: ValueKey(iconData),
-                          color: (loading || listening || hasContent)
-                              ? Colors.white
-                              : Theme.of(context).hintColor,
+                          color:
+                              (loading || listening || hasContent || !canChat)
+                                  ? Colors.white
+                                  : Theme.of(context).hintColor,
                           size: iconData == Icons.mic_none_rounded ? 18 : 20),
                     ),
                   ),
@@ -775,12 +745,13 @@ class ChatView extends GetView<ChatController> {
                       color: isDark ? Colors.white : Colors.black))),
           Divider(height: 0.5, color: _sep(context)),
           Flexible(child: Obx(() {
-            if (controller.sessions.isEmpty)
+            if (controller.sessions.isEmpty) {
               return Padding(
                   padding: const EdgeInsets.all(32),
                   child: Text('No conversations yet',
                       style: GoogleFonts.inter(
                           color: Theme.of(context).hintColor)));
+            }
             return ListView.separated(
               shrinkWrap: true,
               itemCount: controller.sessions.length,
@@ -854,21 +825,6 @@ class ChatView extends GetView<ChatController> {
             color: codeBg, borderRadius: BorderRadius.circular(12)));
   }
 
-  MarkdownStyleSheet _thoughtMd(BuildContext c, bool isDark) {
-    final muted = Theme.of(c).hintColor;
-    final base = GoogleFonts.inter(fontSize: 13, color: muted, height: 1.4);
-    final codeBg = isDark ? const Color(0xFF2C2C2E) : const Color(0xFFE5E5EA);
-    return MarkdownStyleSheet.fromTheme(Theme.of(c)).copyWith(
-        p: base,
-        strong: base.copyWith(fontWeight: FontWeight.w600),
-        em: base.copyWith(fontStyle: FontStyle.italic),
-        listBullet: base,
-        code: GoogleFonts.firaCode(
-            fontSize: 11, color: muted, backgroundColor: codeBg),
-        codeblockDecoration: BoxDecoration(
-            color: codeBg, borderRadius: BorderRadius.circular(10)));
-  }
-
   // ── Helpers ──
   String _cleanStream(String t) => t
       .replaceAll(
@@ -887,7 +843,9 @@ class ChatView extends GetView<ChatController> {
           r != 0x200C &&
           r != 0x200D &&
           r != 0xFEFF &&
-          r != 0xFFFD) return true;
+          r != 0xFFFD) {
+        return true;
+      }
     }
     return false;
   }
@@ -1123,264 +1081,6 @@ class _PulsingDotState extends State<_PulsingDot>
         decoration: const BoxDecoration(
             color: Color(0xFFFF3B30), shape: BoxShape.circle),
       ),
-    );
-  }
-}
-
-class _StepButton extends StatelessWidget {
-  final IconData icon;
-  final bool enabled;
-  final VoidCallback onTap;
-
-  const _StepButton({
-    required this.icon,
-    required this.enabled,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final color = enabled
-        ? _appleBlue(context)
-        : Theme.of(context).hintColor.withValues(alpha: 0.35);
-    return GestureDetector(
-      onTap: enabled ? onTap : null,
-      behavior: HitTestBehavior.opaque,
-      child: SizedBox(
-        width: 30,
-        height: 30,
-        child: Icon(icon, size: 16, color: color),
-      ),
-    );
-  }
-}
-
-// ── Image Generation Indicator ──
-class _ImageGenIndicator extends StatefulWidget {
-  final ChatController controller;
-  final bool isDark;
-  const _ImageGenIndicator({required this.controller, required this.isDark});
-
-  @override
-  State<_ImageGenIndicator> createState() => _ImageGenIndicatorState();
-}
-
-class _ImageGenIndicatorState extends State<_ImageGenIndicator>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _c;
-  late Timer _timer;
-  int _elapsedSeconds = 0;
-
-  @override
-  void initState() {
-    super.initState();
-    _c = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1800),
-    )..repeat();
-    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
-      final start = widget.controller.imageGenStartTime.value;
-      if (start != null) {
-        setState(() {
-          _elapsedSeconds = DateTime.now().difference(start).inSeconds;
-        });
-      }
-    });
-  }
-
-  @override
-  void dispose() {
-    _timer.cancel();
-    _c.dispose();
-    super.dispose();
-  }
-
-  String _fmtEta(int seconds) {
-    if (seconds <= 0) return '';
-    if (seconds < 60) return '~$seconds s remaining';
-    final m = seconds ~/ 60;
-    final s = seconds % 60;
-    return s > 0 ? '~$m m $s s remaining' : '~$m m remaining';
-  }
-
-  String _fmtElapsed(int seconds) {
-    if (seconds < 60) return '${seconds}s';
-    final m = seconds ~/ 60;
-    final s = seconds % 60;
-    return s > 0 ? '${m}m ${s}s' : '${m}m';
-  }
-
-  Widget _backendChip(BuildContext context) {
-    final localImage = Get.find<LocalImageService>();
-    final backend = localImage.currentBackend.value;
-    final isCpu = backend == Backend.cpu;
-    final color = isCpu
-        ? const Color(0xFFFF9500) // Orange for CPU
-        : const Color(0xFF34C759); // Green for GPU
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: color.withValues(alpha: 0.3), width: 0.5),
-      ),
-      child: Text(
-        isCpu
-            ? 'CPU · Slow'
-            : backend.displayName.split(' ').first.toUpperCase(),
-        style: GoogleFonts.inter(
-          fontSize: 9,
-          fontWeight: FontWeight.w600,
-          color: color,
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _c,
-      builder: (_, __) {
-        final dots = Row(
-          mainAxisSize: MainAxisSize.min,
-          children: List.generate(3, (i) {
-            final t = ((_c.value - i * 0.18) % 1.0).clamp(0.0, 1.0);
-            final pulse = math.sin(t * math.pi).clamp(0.0, 1.0);
-            return Padding(
-              padding: EdgeInsets.only(right: i < 2 ? 5 : 0),
-              child: Opacity(
-                opacity: 0.25 + 0.75 * pulse,
-                child: Container(
-                  width: 7,
-                  height: 7,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: widget.isDark
-                        ? Colors.white.withValues(alpha: 0.6)
-                        : Colors.black.withValues(alpha: 0.35),
-                  ),
-                ),
-              ),
-            );
-          }),
-        );
-
-        return Obx(() {
-          final step = widget.controller.imageGenStep.value;
-          final total = widget.controller.imageGenTotal.value;
-          final eta = widget.controller.imageGenEstimatedSecs.value;
-          final decoding = widget.controller.imageGenDecoding.value;
-          final hasProgress = total > 0;
-          final pct = hasProgress ? (step / total).clamp(0.0, 1.0) : 0.0;
-          final isDone = decoding || (hasProgress && step >= total);
-
-          return Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              dots,
-              const SizedBox(height: 10),
-              Text(
-                isDone ? 'Decoding image' : 'Generating image',
-                style: GoogleFonts.inter(
-                  fontSize: 13,
-                  color: Theme.of(context).hintColor,
-                  fontWeight: FontWeight.w400,
-                ),
-              ),
-              if (hasProgress) ...[
-                const SizedBox(height: 10),
-                // Progress bar (pulse at 100% during decode)
-                Container(
-                  width: 160,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: (widget.isDark ? Colors.white : Colors.black)
-                        .withValues(alpha: 0.08),
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                  child: FractionallySizedBox(
-                    alignment: Alignment.centerLeft,
-                    widthFactor: isDone ? 1.0 : pct,
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: _appleBlue(context),
-                        borderRadius: BorderRadius.circular(2),
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                // Percentage + steps / decoding message
-                Text(
-                  isDone
-                      ? 'VAE decode in progress…'
-                      : '${(pct * 100).toStringAsFixed(0)}% · Step $step of $total',
-                  style: GoogleFonts.inter(
-                    fontSize: 11,
-                    color: Theme.of(context).hintColor.withValues(alpha: 0.6),
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-                // Backend badge
-                const SizedBox(height: 5),
-                _backendChip(context),
-                // Elapsed time
-                const SizedBox(height: 3),
-                Text(
-                  'Elapsed: ${_fmtElapsed(_elapsedSeconds)}',
-                  style: GoogleFonts.inter(
-                    fontSize: 10,
-                    color: Theme.of(context).hintColor.withValues(alpha: 0.45),
-                  ),
-                ),
-                // ETA (only if we have a real estimate and not done)
-                if (eta > 0 && step >= 2 && !isDone) ...[
-                  const SizedBox(height: 3),
-                  Text(
-                    _fmtEta(eta),
-                    style: GoogleFonts.inter(
-                      fontSize: 10,
-                      color:
-                          Theme.of(context).hintColor.withValues(alpha: 0.45),
-                    ),
-                  ),
-                ],
-                const SizedBox(height: 10),
-                // Cancel button
-                GestureDetector(
-                  onTap: widget.controller.stopGenerating,
-                  child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFFF3B30).withValues(alpha: 0.1),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.stop_rounded,
-                            size: 12, color: const Color(0xFFFF3B30)),
-                        const SizedBox(width: 4),
-                        Text(
-                          'Cancel',
-                          style: GoogleFonts.inter(
-                            fontSize: 11,
-                            color: const Color(0xFFFF3B30),
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-            ],
-          );
-        });
-      },
     );
   }
 }

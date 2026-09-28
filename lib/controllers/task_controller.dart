@@ -39,7 +39,8 @@ class TaskController extends GetxController {
     isPlanning.value = true;
 
     try {
-      final planPrompt = '''You are an Android automation planner. Given a user's goal, break it down into individual ADB shell commands to execute on an Android phone.
+      final planPrompt =
+          '''You are an Android automation planner. Given a user's goal, break it down into individual ADB shell commands to execute on an Android phone.
 
 Output ONLY a numbered list of steps. Each step must have:
 - A short description
@@ -167,7 +168,7 @@ Steps:''';
         final cmd = trimmed.substring(4).trim();
         steps.add(TaskStep(
           index: stepIndex++,
-          description: currentDesc ?? 'Step ${stepIndex}',
+          description: currentDesc ?? 'Step $stepIndex',
           command: cmd,
         ));
         currentDesc = null;

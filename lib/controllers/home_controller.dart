@@ -1,21 +1,23 @@
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import '../services/hive_service.dart';
-import '../services/inference_service.dart';
-import '../services/local_image_service.dart';
 import '../services/download_service.dart';
+import '../services/model_selection_service.dart';
+import 'model_controller.dart';
 import '../core/constants.dart';
 
 class HomeController extends GetxController {
+  static const tabCount = 2;
+
   final currentTab = 0.obs;
   bool _resumeDialogShown = false;
 
   void changeTab(int index) {
-    currentTab.value = index;
+    currentTab.value = index.clamp(0, tabCount - 1).toInt();
   }
 
   /// Shows a one-time dialog on startup asking if the user wants to reload
-  /// the last used model (text or image). Does not auto-load anything.
+  /// the last used local model. Does not auto-load anything.
   void checkResumeModel(BuildContext context) async {
     if (_resumeDialogShown) return;
     _resumeDialogShown = true;
@@ -26,29 +28,19 @@ class HomeController extends GetxController {
     // Check text model
     final textName = hive.getSetting<String>(AppConstants.keyLocalModelName);
     final textPath = hive.getSetting<String>(AppConstants.keyLocalModelPath);
-    final textRuntime = hive.getSetting<String>(AppConstants.keyLocalModelRuntime);
+    final selectedModel = Get.find<ModelSelectionService>().selectedModel.value;
+    if (selectedModel == null) return;
     bool hasText = textName != null &&
         textName.isNotEmpty &&
         textPath != null &&
         textPath.isNotEmpty &&
+        textName == selectedModel.filename &&
         await downloadService.isModelDownloaded(textName);
 
-    // Check image model
-    final imageName = hive.getSetting<String>(AppConstants.keyImageModelName);
-    final imagePath = hive.getSetting<String>(AppConstants.keyImageModelPath);
-    bool hasImage = imageName != null &&
-        imageName.isNotEmpty &&
-        imagePath != null &&
-        imagePath.isNotEmpty &&
-        await downloadService.isModelDownloaded(imageName);
-
-    if (!hasText && !hasImage) return;
+    if (!hasText) return;
     if (!context.mounted) return;
 
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final label = hasText && hasImage
-        ? '$textName & $imageName'
-        : (hasText ? textName : imageName);
 
     showDialog(
       context: context,
@@ -60,30 +52,26 @@ class HomeController extends GetxController {
             style: TextStyle(
                 color: isDark ? Colors.white : Colors.black,
                 fontWeight: FontWeight.w600)),
-        content: Text(
-            'Load your last model${hasImage && hasText ? 's' : ''}?\n\n$label',
-            style: TextStyle(
-                color: isDark ? Colors.white70 : Colors.black87)),
+        content: Text('Load your last model?\n\n${selectedModel.name}',
+            style: TextStyle(color: isDark ? Colors.white70 : Colors.black87)),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(),
             child: Text('Skip',
-                style: TextStyle(color: isDark ? Colors.white54 : Colors.black54)),
+                style:
+                    TextStyle(color: isDark ? Colors.white54 : Colors.black54)),
           ),
           FilledButton(
             style: FilledButton.styleFrom(
-              backgroundColor: isDark ? const Color(0xFF0A84FF) : const Color(0xFF007AFF),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              backgroundColor:
+                  isDark ? const Color(0xFF0A84FF) : const Color(0xFF007AFF),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10)),
             ),
             onPressed: () {
               Navigator.of(context).pop();
               if (hasText) {
-                Get.find<InferenceService>().loadModel(textPath,
-                    modelName: textName, modelRuntime: textRuntime);
-              }
-              if (hasImage) {
-                Get.find<LocalImageService>().loadModel(imagePath,
-                    modelName: imageName);
+                Get.find<ModelController>().loadModel(selectedModel.filename);
               }
             },
             child: const Text('Load'),

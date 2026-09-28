@@ -6,16 +6,24 @@ import '../controllers/model_controller.dart';
 import '../controllers/settings_controller.dart';
 import '../views/home_view.dart';
 import '../views/chat_view.dart';
+import '../views/model_view.dart';
 import '../views/task_view.dart';
+import '../views/splash_view.dart';
 
 abstract class AppRoutes {
+  static const splash = '/splash';
   static const home = '/';
   static const chat = '/chat';
+  static const models = '/models';
   static const task = '/task';
 }
 
 class AppPages {
   static final pages = [
+    GetPage(
+      name: AppRoutes.splash,
+      page: () => const SplashView(),
+    ),
     GetPage(
       name: AppRoutes.home,
       page: () => const HomeView(),
@@ -32,6 +40,13 @@ class AppPages {
       page: () => const ChatView(),
       binding: BindingsBuilder(() {
         Get.lazyPut(() => ChatController());
+      }),
+    ),
+    GetPage(
+      name: AppRoutes.models,
+      page: () => const ModelView(),
+      binding: BindingsBuilder(() {
+        Get.lazyPut(() => ModelController());
       }),
     ),
     GetPage(

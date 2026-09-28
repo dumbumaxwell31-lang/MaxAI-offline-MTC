@@ -1,12 +1,11 @@
 import 'dart:io';
-import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import '../controllers/model_controller.dart';
+import 'device_eligibility_service.dart';
 
-import 'download_native.dart' if (dart.library.html) 'download_web.dart'
-    as platform_dl;
+import 'download_native.dart' as platform_dl;
 
 /// State for an individual download.
 class DownloadProgress {
@@ -30,17 +29,18 @@ class DownloadProgress {
   }
 }
 
-/// Service for downloading GGUF model files with progress tracking.
-/// On web: downloads are not supported (models are too large for browser).
+/// Android service for downloading GGUF model files with progress tracking.
 class DownloadService extends GetxService with WidgetsBindingObserver {
   /// Currently active downloads.
   final activeDownloads = <String, DownloadProgress>{}.obs;
+  final failedDownloads = <String, String>{}.obs;
+  final downloadUpdateSequence = 0.obs;
   final _nativeDownloadIds = <String, int>{};
 
   bool get isDownloadingAny => activeDownloads.isNotEmpty;
 
-  /// Whether the platform supports downloading models.
-  bool get supportsDownload => !kIsWeb;
+  /// Whether this Android build can download models.
+  bool get supportsDownload => Platform.isAndroid;
 
   Future<String> get modelsDir async => await platform_dl.getModelsDir();
 
@@ -49,22 +49,31 @@ class DownloadService extends GetxService with WidgetsBindingObserver {
   }
 
   Future<bool> isModelDownloaded(String filename) async {
-    if (kIsWeb) return false;
+    if (!Platform.isAndroid) return false;
     return await platform_dl.isModelDownloaded(await modelPath(filename));
   }
 
   Future<List<String>> getDownloadedModels() async {
-    if (kIsWeb) return [];
+    if (!Platform.isAndroid) return [];
     return await platform_dl.getDownloadedModels(await modelsDir);
   }
 
   Future<int> getModelSize(String filename) async {
-    if (kIsWeb) return 0;
+    if (!Platform.isAndroid) return 0;
     return await platform_dl.getModelSize(await modelPath(filename));
   }
 
+  Future<int?> getAvailableStorageBytes() async {
+    if (!Platform.isAndroid) return null;
+    try {
+      return await platform_dl.getAvailableStorageBytes(await modelsDir);
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<int> getRemoteFileSize(String url, {String? authToken}) async {
-    if (kIsWeb) return 0;
+    if (!Platform.isAndroid) return 0;
     return await platform_dl.getRemoteFileSize(url, authToken: authToken);
   }
 
@@ -72,16 +81,16 @@ class DownloadService extends GetxService with WidgetsBindingObserver {
   void onInit() {
     super.onInit();
 
-    if (!kIsWeb && Platform.isAndroid) {
+    if (Platform.isAndroid) {
       WidgetsBinding.instance.addObserver(this);
 
       // Initial reconciliation on startup
       reconcileActiveDownloads();
 
       // Permanent channel progress listener
-      const MethodChannel('com.aichat.ai_chat/model_import')
+      const MethodChannel('com.maxai/model_download')
           .setMethodCallHandler((call) async {
-        if (call.method == 'importProgress') {
+        if (call.method == 'downloadProgress') {
           final data = Map<String, dynamic>.from(call.arguments as Map);
           final filename = data['filename'] as String;
           final downloaded = (data['copiedBytes'] as num).toInt();
@@ -108,6 +117,7 @@ class DownloadService extends GetxService with WidgetsBindingObserver {
             if (status == 'Download complete') {
               activeDownloads.remove(filename);
               _nativeDownloadIds.remove(filename);
+              failedDownloads.remove(filename);
               // Trigger reload
               try {
                 Get.find<ModelController>().refreshDownloaded();
@@ -116,44 +126,11 @@ class DownloadService extends GetxService with WidgetsBindingObserver {
                 status == 'Download cancelled') {
               activeDownloads.remove(filename);
               _nativeDownloadIds.remove(filename);
+              failedDownloads[filename] = status;
             }
+            downloadUpdateSequence.value++;
           }
 
-          // Also update ModelController import state in real-time if it is currently importing
-          try {
-            final modelCtrl = Get.find<ModelController>();
-            if (modelCtrl.isImporting.value) {
-              final isPhoneDownload =
-                  modelCtrl.importStatus.value.contains('phone') ||
-                      modelCtrl.importStatus.value.contains('Starting');
-
-              modelCtrl.importFileName.value = filename;
-              modelCtrl.importStatus.value = status;
-              modelCtrl.importCopiedBytes.value = downloaded;
-              modelCtrl.importTotalBytes.value = total;
-              modelCtrl.importBytesPerSecond.value = speed;
-
-              if (status == 'Download complete' ||
-                  status.startsWith('Download failed') ||
-                  status == 'Download cancelled') {
-                if (status == 'Download complete' && isPhoneDownload) {
-                  Get.snackbar(
-                    'Saved to Downloads',
-                    'Import this file to use it in the app.',
-                    snackPosition: SnackPosition.BOTTOM,
-                    duration: const Duration(seconds: 5),
-                  );
-                }
-                Future.delayed(const Duration(seconds: 3), () {
-                  if (modelCtrl.importStatus.value == status) {
-                    modelCtrl.isImporting.value = false;
-                    modelCtrl.importFileName.value = '';
-                    modelCtrl.importStatus.value = '';
-                  }
-                });
-              }
-            }
-          } catch (_) {}
         }
         return null;
       });
@@ -162,7 +139,7 @@ class DownloadService extends GetxService with WidgetsBindingObserver {
 
   @override
   void onClose() {
-    if (!kIsWeb && Platform.isAndroid) {
+    if (Platform.isAndroid) {
       WidgetsBinding.instance.removeObserver(this);
     }
     super.onClose();
@@ -176,7 +153,7 @@ class DownloadService extends GetxService with WidgetsBindingObserver {
   }
 
   Future<void> reconcileActiveDownloads() async {
-    if (kIsWeb || !Platform.isAndroid) return;
+    if (!Platform.isAndroid) return;
     try {
       final list = await platform_dl.getActiveNativeDownloads();
       final recoveredFilenames = <String>{};
@@ -200,6 +177,7 @@ class DownloadService extends GetxService with WidgetsBindingObserver {
         if (!activeDownloads.containsKey(filename)) {
           activeDownloads[filename] = progress;
         }
+        downloadUpdateSequence.value++;
       }
 
       // Remove UI entries whose native DownloadManager jobs no longer exist.
@@ -210,6 +188,7 @@ class DownloadService extends GetxService with WidgetsBindingObserver {
         _nativeDownloadIds.remove(filename);
         activeDownloads.remove(filename);
       }
+      downloadUpdateSequence.value++;
     } catch (e) {
       print('[DownloadService] Failed to reconcile active downloads: $e');
     }
@@ -219,59 +198,42 @@ class DownloadService extends GetxService with WidgetsBindingObserver {
     required String url,
     required String filename,
     String? authToken,
+    int expectedBytes = 0,
   }) async {
-    if (kIsWeb) return 'ERROR: Downloading models is not supported on web.';
+    if (!Platform.isAndroid) {
+      return 'ERROR: Model downloads are available only on Android.';
+    }
+    if (Get.isRegistered<DeviceEligibilityService>()) {
+      final eligibility =
+          await Get.find<DeviceEligibilityService>().refreshEligibility();
+      if (!eligibility.isEligible) {
+        return 'INELIGIBLE: ${eligibility.message}';
+      }
+    }
+    if (activeDownloads.containsKey(filename)) return 'ALREADY_DOWNLOADING';
 
     final downloadProgress = DownloadProgress(filename: filename);
     activeDownloads[filename] = downloadProgress;
+    failedDownloads.remove(filename);
 
-    if (Platform.isAndroid) {
-      try {
-        final modelsDirectory = await modelsDir;
-        final result = await platform_dl.startNativeDownload(
-          url: url,
-          filename: filename,
-          modelsDir: modelsDirectory,
-        );
-        if (result != null) {
-          final id = result['downloadId'] as int;
-          _nativeDownloadIds[filename] = id;
-          return 'NATIVE_BACKGROUND_STARTED';
-        }
-        throw Exception('Native download failed to start.');
-      } catch (e) {
-        activeDownloads.remove(filename);
-        rethrow;
+    try {
+      final modelsDirectory = await modelsDir;
+      final result = await platform_dl.startNativeDownload(
+        url: url,
+        filename: filename,
+        modelsDir: modelsDirectory,
+        expectedBytes: expectedBytes,
+      );
+      if (result != null) {
+        final id = result['downloadId'] as int;
+        _nativeDownloadIds[filename] = id;
+        return 'NATIVE_BACKGROUND_STARTED';
       }
-    } else {
-      // Fallback for iOS/Desktop using standard Dio download
-      final savePath = await modelPath(filename);
-      try {
-        final result = await platform_dl.downloadModel(
-          url: url,
-          savePath: savePath,
-          authToken: authToken,
-          onProgress: (received, total) {
-            downloadProgress.downloadedBytes.value = received;
-            downloadProgress.totalBytes.value = total;
-            final elapsed = DateTime.now()
-                .difference(downloadProgress.startedAt)
-                .inMilliseconds;
-            if (elapsed > 0) {
-              downloadProgress.bytesPerSecond.value =
-                  received / (elapsed / 1000);
-            }
-            if (total > 0) {
-              downloadProgress.progress.value = received / total;
-            }
-          },
-        );
-        activeDownloads.remove(filename);
-        return result;
-      } catch (e) {
-        activeDownloads.remove(filename);
-        rethrow;
-      }
+      throw Exception('Native download failed to start.');
+    } catch (e) {
+      activeDownloads.remove(filename);
+      failedDownloads[filename] = '$e';
+      rethrow;
     }
   }
 
@@ -282,14 +244,11 @@ class DownloadService extends GetxService with WidgetsBindingObserver {
           downloadId: nativeId, filename: filename);
       activeDownloads.remove(filename);
       _nativeDownloadIds.remove(filename);
-    } else {
-      platform_dl.pauseDownload(filename);
-      activeDownloads[filename]?.isPaused.value = true;
     }
   }
 
   Future<void> deleteModel(String filename) async {
-    if (kIsWeb) return;
+    if (!Platform.isAndroid) return;
     final nativeId = _nativeDownloadIds[filename];
     if (nativeId != null && Platform.isAndroid) {
       await platform_dl.cancelNativeDownload(

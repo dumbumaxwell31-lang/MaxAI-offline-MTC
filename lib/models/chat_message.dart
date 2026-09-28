@@ -17,7 +17,6 @@ class ChatMessage {
   final bool isCommand;
   final double? tokensPerSec;
   final int? thoughtDurationSeconds;
-  final int? imageGenDurationMs; // Time taken to generate image locally
   final DateTime timestamp;
 
   // Cache decoded bytes to prevent flickering on re-build
@@ -45,7 +44,6 @@ class ChatMessage {
     this.isCommand = false,
     this.tokensPerSec,
     this.thoughtDurationSeconds,
-    this.imageGenDurationMs,
     DateTime? timestamp,
   }) : timestamp = timestamp ?? DateTime.now();
 
@@ -65,7 +63,6 @@ class ChatMessage {
         'isCommand': isCommand,
         'tokensPerSec': tokensPerSec,
         'thoughtDurationSeconds': thoughtDurationSeconds,
-        'imageGenDurationMs': imageGenDurationMs,
         'timestamp': timestamp.toIso8601String(),
       };
 
@@ -89,9 +86,6 @@ class ChatMessage {
             : null,
         thoughtDurationSeconds: map['thoughtDurationSeconds'] != null
             ? (map['thoughtDurationSeconds'] as num).toInt()
-            : null,
-        imageGenDurationMs: map['imageGenDurationMs'] != null
-            ? (map['imageGenDurationMs'] as num).toInt()
             : null,
         timestamp: DateTime.tryParse(map['timestamp'] ?? '') ?? DateTime.now(),
       );

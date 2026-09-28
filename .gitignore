@@ -48,42 +48,15 @@ app.*.map.json
 key.properties
 /android/key.properties
 
-# Firebase & API configs (safety)
-google-services.json
-GoogleService-Info.plist
-firebase_options.dart
-lib/firebase_options.dart
-
 # Local env / secrets
 .env
 .env.*
 *.secret
 secrets/
 
-# iOS
-/ios/Pods/
-/ios/.symlinks/
-/ios/Flutter/Flutter.podspec
-
-# macOS
-/macos/Flutter/ephemeral/
-/macos/Pods/
-
-# Linux
-/linux/flutter/ephemeral/
-
-# Windows
-/windows/flutter/ephemeral/
-
-# Web
-/web/firebase-config.js
-
-# Firebase hosting cache
-.firebase/
-
 # Local plugin build artifacts / downloaded dependencies
 local_plugins/**/android/src/main/cpp/vulkan-headers/
-local_plugins/**/ios/sd_cpp_src/
 local_plugins/**/android/.cxx/
+local_plugins/**/android/.gradle/
 local_plugins/**/android/build/
 reference_local_diffusion/

@@ -1,66 +1,44 @@
+import 'dart:io' show Platform;
+
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:get/get.dart';
 
-import 'device_info_native.dart' if (dart.library.html) 'device_info_web.dart'
-    as platform_info;
+import 'device_info_native.dart' as platform_info;
+import 'inference_resource_policy.dart';
 
 /// Device capability detection — reads RAM to set safe inference limits.
-/// Cross-platform: works on Android/iOS natively, defaults on web.
 class DeviceInfoService extends GetxService {
   final totalRamGB = 0.0.obs;
   final availableRamGB = 0.0.obs;
+  final hasTotalRamMeasurement = false.obs;
+  final hasAvailableRamMeasurement = false.obs;
   final deviceTier = ''.obs; // 'low', 'mid', 'high', 'ultra'
   final isTensorSoC = false.obs;
   final socFamily = platform_info.SocFamily.unknown.obs;
   final socHardware = ''.obs;
+  final androidVersion = ''.obs;
+  final androidApiLevel = 0.obs;
+  final cpuArchitecture = ''.obs;
+  final cpuCoreCount = 0.obs;
+  final deviceName = ''.obs;
 
-  // Recommended limits based on device RAM
-  int get recommendedContextSize => _tierConfig['contextSize']!;
-  int get recommendedMaxTokens => _tierConfig['maxTokens']!;
-  int get maxSafeContextSize => _tierConfig['maxContextSize']!;
-  int get maxSafeTokens => _tierConfig['maxSafeTokens']!;
+  InferenceResourceLimits get recommendedInferenceLimits =>
+      InferenceResourcePolicy.forAvailableRam(
+        availableRamGb:
+            hasAvailableRamMeasurement.value ? availableRamGB.value : null,
+        modelContextLimit: 8192,
+        modelOutputLimit: 4096,
+      );
 
-  Map<String, int> get _tierConfig {
-    final ram = totalRamGB.value;
-    if (ram <= 4) {
-      return {
-        'contextSize': 1024,
-        'maxTokens': 256,
-        'maxContextSize': 2048,
-        'maxSafeTokens': 512,
-      };
-    } else if (ram <= 6) {
-      return {
-        'contextSize': 2048,
-        'maxTokens': 512,
-        'maxContextSize': 4096,
-        'maxSafeTokens': 1024,
-      };
-    } else if (ram <= 8) {
-      return {
-        'contextSize': 4096,
-        'maxTokens': 1024,
-        'maxContextSize': 8192,
-        'maxSafeTokens': 2048,
-      };
-    } else if (ram <= 12) {
-      return {
-        'contextSize': 4096,
-        'maxTokens': 2048,
-        'maxContextSize': 8192,
-        'maxSafeTokens': 4096,
-      };
-    } else {
-      return {
-        'contextSize': 8192,
-        'maxTokens': 4096,
-        'maxContextSize': 16384,
-        'maxSafeTokens': 4096,
-      };
-    }
-  }
+  int get recommendedContextSize => recommendedInferenceLimits.contextSize;
+  int get recommendedMaxTokens => recommendedInferenceLimits.maxOutputTokens;
+  int get maxSafeContextSize => recommendedContextSize;
+  int get maxSafeTokens => recommendedMaxTokens;
+  String? get inferenceLimitNotice => recommendedInferenceLimits.explanation;
 
   Future<DeviceInfoService> init() async {
     await refreshMemoryInfo();
+    await refreshPlatformInfo();
 
     // Classify device tier
     final ram = totalRamGB.value;
@@ -80,15 +58,51 @@ class DeviceInfoService extends GetxService {
     return this;
   }
 
+  Future<void> refreshPlatformInfo() async {
+    cpuCoreCount.value = Platform.numberOfProcessors;
+    if (!Platform.isAndroid) return;
+
+    try {
+      final info = await DeviceInfoPlugin().androidInfo;
+      androidVersion.value = info.version.release;
+      androidApiLevel.value = info.version.sdkInt;
+      cpuArchitecture.value =
+          info.supportedAbis.isEmpty ? '' : info.supportedAbis.first;
+      deviceName.value = '${info.manufacturer} ${info.model}'.trim();
+    } catch (_) {
+      androidVersion.value = '';
+      androidApiLevel.value = 0;
+      cpuArchitecture.value = '';
+      deviceName.value = '';
+    }
+  }
+
   Future<void> refreshMemoryInfo() async {
-    final info = await platform_info.getDeviceInfo();
-    totalRamGB.value = (info['totalRamGB'] as num).toDouble();
-    availableRamGB.value = (info['availableRamGB'] as num).toDouble();
-    isTensorSoC.value = (info['isTensorSoC'] as num? ?? 0.0) > 0.5;
-    final rawIndex = (info['socFamily'] as num? ?? 8).toInt();
-    final clamped = rawIndex < 0 ? 0 : (rawIndex > 8 ? 8 : rawIndex);
-    socFamily.value = platform_info.SocFamily.values[clamped];
-    socHardware.value = (info['socHardware'] as String?) ?? '';
+    try {
+      final info = await platform_info.getDeviceInfo();
+      final totalRam = info['totalRamGB'] as num?;
+      final availableRam = info['availableRamGB'] as num?;
+      totalRamGB.value = totalRam?.toDouble() ?? 0;
+      availableRamGB.value = availableRam?.toDouble() ?? 0;
+      hasTotalRamMeasurement.value = totalRam != null && totalRamGB.value >= 0;
+      hasAvailableRamMeasurement.value =
+          (info['hasAvailableRamMeasurement'] as bool? ?? false) &&
+              availableRam != null &&
+              availableRamGB.value >= 0;
+      isTensorSoC.value = (info['isTensorSoC'] as num? ?? 0.0) > 0.5;
+      final rawIndex = (info['socFamily'] as num? ?? 7).toInt();
+      final clamped = rawIndex < 0 ? 0 : (rawIndex > 7 ? 7 : rawIndex);
+      socFamily.value = platform_info.SocFamily.values[clamped];
+      socHardware.value = (info['socHardware'] as String?) ?? '';
+    } catch (_) {
+      totalRamGB.value = 0;
+      availableRamGB.value = 0;
+      hasTotalRamMeasurement.value = false;
+      hasAvailableRamMeasurement.value = false;
+      isTensorSoC.value = false;
+      socFamily.value = platform_info.SocFamily.unknown;
+      socHardware.value = '';
+    }
   }
 
   String get tierDescription {

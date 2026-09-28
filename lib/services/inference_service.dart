@@ -1,18 +1,17 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:get/get.dart';
 import 'hive_service.dart';
 import '../core/constants.dart';
 import 'device_info_service.dart';
 import 'app_log_service.dart';
+import 'model_selection_service.dart';
+import 'inference_resource_policy.dart';
 
 // Conditionally import llama_flutter_android — only on Android
-import 'inference_android.dart' if (dart.library.html) 'inference_stub.dart'
-    as platform;
+import 'inference_android.dart' as platform;
 
 /// Cross-platform inference service.
-/// - Android / iOS: uses llama_flutter_android for local GGUF models
-/// - Android: uses flutter_litert_lm for LiteRT-LM models
-/// - Web: cloud-only mode (local inference coming soon)
 class InferenceService extends GetxService {
   final HiveService _hive = Get.find<HiveService>();
 
@@ -35,126 +34,207 @@ class InferenceService extends GetxService {
   final isGpuAccelerated = false.obs;
   final loadedModelRuntime = ''.obs;
   final loadedBackend = ''.obs;
+  final resourceConfigurationNotice = ''.obs;
 
   /// Whether the current platform supports local inference.
   bool get supportsLocalInference => platform.supportsLocalInference;
 
   // Platform-specific engine
   platform.InferenceEngine? _engine;
-  String _sessionNativeRuntime = '';
-
-  String get sessionNativeRuntime => _sessionNativeRuntime;
-
-  bool requiresAppRestartForRuntime(String runtime) {
-    final normalized = runtime.toLowerCase();
-    if (normalized != 'llama' && normalized != 'litert') return false;
-    return _sessionNativeRuntime.isNotEmpty &&
-        _sessionNativeRuntime != normalized;
-  }
-
+  int _activeMaxOutputTokens = 0;
   Future<String> loadModel(
     String modelPath, {
     String? modelName,
-    String? modelRuntime,
-    bool enableLiteRtVision = false,
   }) async {
     if (!supportsLocalInference) {
       return 'ERROR: Local inference is not available on this platform. Use Cloud mode.';
     }
     if (isLoadingModel.value) return 'ERROR: Model is already loading.';
-
-    if (modelPath.toLowerCase().endsWith('.safetensors')) {
-      return 'ERROR: Cannot load image generation models (.safetensors) into the local text engine. Native local image generation requires the upcoming stable-diffusion engine update. Use Cloud Stability AI for now.';
+    if (!modelPath.toLowerCase().endsWith('.gguf')) {
+      return 'ERROR: Local inference supports GGUF model files only.';
     }
 
     try {
-      final runtime = _runtimeFor(modelPath, modelRuntime);
-      final isLiteRt = runtime == 'litert';
-      final liteRtMode = _hive.getSetting<String>(
-            AppConstants.keyLiteRtPerformanceMode,
-            defaultValue: AppConstants.defaultLiteRtPerformanceMode,
-          ) ??
-          AppConstants.defaultLiteRtPerformanceMode;
-      final hadPendingGpuLoad = isLiteRt &&
-          (_hive.getSetting<bool>(
-                AppConstants.keyLiteRtGpuLoadPending,
-                defaultValue: false,
-              ) ??
-              false);
-      if (hadPendingGpuLoad) {
-        await _hive.setSetting(AppConstants.keyLiteRtGpuLoadPending, false);
-        await _hive.setSetting(AppConstants.keyLiteRtGpuCrashDetected, true);
-      }
-      final gpuCrashDetected = isLiteRt &&
-          (_hive.getSetting<bool>(
-                AppConstants.keyLiteRtGpuCrashDetected,
-                defaultValue: false,
-              ) ??
-              false);
-      final forceLiteRtCpu = isLiteRt &&
-          (liteRtMode == 'cpu_safe' ||
-              (liteRtMode == 'auto_fast' && gpuCrashDetected));
-      final shouldTryLiteRtGpu =
-          isLiteRt && !forceLiteRtCpu && liteRtMode != 'cpu_safe';
-
       await unloadModel();
       isLoadingModel.value = true;
       loadingModelName.value = modelName ?? modelPath.split('/').last;
       modelLoadProgress.value = 0.0;
 
-      _engine = platform.InferenceEngine();
-
-      final contextSize = _hive.getSetting<int>(
+      final configuredContextSize = _hive.getSetting<int>(
             AppConstants.keyContextSize,
             defaultValue: AppConstants.defaultContextSize,
           ) ??
           AppConstants.defaultContextSize;
+      final selectedModel = Get.isRegistered<ModelSelectionService>()
+          ? Get.find<ModelSelectionService>().selectedModel.value
+          : null;
+      final requestedModelName = modelName ?? modelPath.split('/').last;
+      final isSelectedModel = selectedModel != null &&
+          (requestedModelName == selectedModel.filename ||
+              modelPath.endsWith(selectedModel.filename));
+      final configuredMaxTokens = _hive.getSetting<int>(
+            AppConstants.keyMaxTokens,
+            defaultValue: AppConstants.defaultMaxTokens,
+          ) ??
+          AppConstants.defaultMaxTokens;
+      final modelContextLimit = isSelectedModel
+          ? selectedModel.maxContextSize
+          : configuredContextSize;
+      final modelOutputLimit = isSelectedModel
+          ? selectedModel.maxOutputTokens
+          : configuredMaxTokens;
 
-      final finalContextSize =
-          isLiteRt ? contextSize.clamp(512, 4096) : contextSize;
-
-      final lastLoadedContext =
-          _hive.getSetting<int>('last_loaded_context_size') ?? 0;
-      final contextChanged = isLiteRt && lastLoadedContext != finalContextSize;
+      double? availableRamGb;
+      if (Get.isRegistered<DeviceInfoService>()) {
+        final deviceInfo = Get.find<DeviceInfoService>();
+        await deviceInfo.refreshMemoryInfo();
+        if (deviceInfo.hasAvailableRamMeasurement.value) {
+          availableRamGb = deviceInfo.availableRamGB.value;
+        }
+      }
+      final resourceLimits = InferenceResourcePolicy.forAvailableRam(
+        availableRamGb: availableRamGb,
+        modelContextLimit: modelContextLimit,
+        modelOutputLimit: modelOutputLimit,
+      );
+      final requestedContextSize = isSelectedModel
+          ? math.min(configuredContextSize, modelContextLimit).toInt()
+          : configuredContextSize;
+      var contextSize = math
+          .min(requestedContextSize, resourceLimits.contextSize)
+          .toInt();
+      final runtimeOutputLimit = math.min(
+        configuredMaxTokens,
+        resourceLimits.maxOutputTokens,
+      );
+      final configuredOutputForContext =
+          InferenceResourcePolicy.outputLimitForContext(
+        contextSize: contextSize,
+        configuredOutputLimit: runtimeOutputLimit,
+        modelOutputLimit: modelOutputLimit,
+      );
+      final notices = <String>[];
+      if (resourceLimits.explanation != null) {
+        notices.add(resourceLimits.explanation!);
+      }
+      if (contextSize < modelContextLimit ||
+          configuredOutputForContext < modelOutputLimit) {
+        notices.add(
+          'Active limits are $contextSize context / '
+          '$configuredOutputForContext output tokens; model maximum is '
+          '$modelContextLimit / $modelOutputLimit. Saved settings are retained.',
+        );
+      }
+      resourceConfigurationNotice.value = notices.join(' ');
 
       final deviceTier = _getDeviceTier();
       final isTensorSoC = _getIsTensorSoC();
 
-      final requestedModelName = modelName ?? modelPath.split('/').last;
       var activeModelName = requestedModelName;
-      var result = await _loadModelOnEngine(
-        modelPath: modelPath,
-        modelRuntime: modelRuntime,
-        contextSize: finalContextSize,
-        deviceTier: deviceTier,
-        isTensorSoC: isTensorSoC,
-        liteRtPerformanceMode: liteRtMode,
-        forceLiteRtCpu: forceLiteRtCpu,
-        clearLiteRtCache: hadPendingGpuLoad ||
-            (isLiteRt && gpuCrashDetected) ||
-            contextChanged,
-        markLiteRtGpuPending: shouldTryLiteRtGpu,
-        enableLiteRtVision: enableLiteRtVision,
-      );
+      platform.LoadResult? loadResult;
+      final contextAttempts =
+          InferenceResourcePolicy.contextRetrySequence(contextSize);
+      for (var attempt = 0; attempt < contextAttempts.length; attempt++) {
+        contextSize = contextAttempts[attempt];
+        final engine = platform.InferenceEngine();
+        platform.LoadResult result;
+        try {
+          result = await engine.loadModel(
+            modelPath: modelPath,
+            contextSize: contextSize,
+            deviceTier: deviceTier,
+            isTensorSoC: isTensorSoC,
+            onProgress: (p) => modelLoadProgress.value = p,
+          );
+        } catch (error) {
+          if (error.toString().toLowerCase().contains('model already loaded')) {
+            final savedModelName =
+                _hive.getSetting<String>(AppConstants.keyLocalModelName) ?? '';
+            activeModelName = savedModelName.isNotEmpty
+                ? savedModelName
+                : requestedModelName;
+            _engine = engine;
+            loadResult = platform.LoadResult(
+              success: true,
+              message: savedModelName == requestedModelName
+                  ? 'Model already loaded.'
+                  : 'A native model is already loaded. Unload it before loading another model.',
+              runtime: 'llama',
+              backend: _hive.getSetting<String>(
+                      AppConstants.keyLocalModelBackend) ??
+                  '',
+            );
+            break;
+          }
 
-      if (!result.success &&
-          result.message.toLowerCase().contains('model already loaded')) {
-        final savedModelName =
-            _hive.getSetting<String>(AppConstants.keyLocalModelName) ?? '';
-        final adoptedModelName =
-            savedModelName.isNotEmpty ? savedModelName : requestedModelName;
-        activeModelName = adoptedModelName;
-        result = platform.LoadResult(
-          success: true,
-          message: savedModelName == requestedModelName
-              ? 'Model already loaded.'
-              : 'A native model is already loaded. Unload it before loading another model.',
-          runtime: modelRuntime ??
-              _hive.getSetting<String>(AppConstants.keyLocalModelRuntime) ??
-              '',
-          backend:
-              _hive.getSetting<String>(AppConstants.keyLocalModelBackend) ?? '',
-        );
+          await engine.dispose();
+          if (InferenceResourcePolicy.isAllocationFailure(error) &&
+              attempt + 1 < contextAttempts.length) {
+            final nextContext = contextAttempts[attempt + 1];
+            final nextOutput = InferenceResourcePolicy.outputLimitForContext(
+              contextSize: nextContext,
+              configuredOutputLimit: runtimeOutputLimit,
+              modelOutputLimit: modelOutputLimit,
+            );
+            resourceConfigurationNotice.value =
+                'The native runtime could not allocate the requested context. '
+                'MaxAI retried with $nextContext context and up to '
+                '$nextOutput output tokens. Saved limits were not changed.';
+            continue;
+          }
+          rethrow;
+        }
+
+        if (!result.success &&
+            result.message.toLowerCase().contains('model already loaded')) {
+          final savedModelName =
+              _hive.getSetting<String>(AppConstants.keyLocalModelName) ?? '';
+          activeModelName = savedModelName.isNotEmpty
+              ? savedModelName
+              : requestedModelName;
+          _engine = engine;
+          loadResult = platform.LoadResult(
+            success: true,
+            message: savedModelName == requestedModelName
+                ? 'Model already loaded.'
+                : 'A native model is already loaded. Unload it before loading another model.',
+            runtime: 'llama',
+            backend:
+                _hive.getSetting<String>(AppConstants.keyLocalModelBackend) ??
+                    '',
+          );
+          break;
+        }
+
+        if (!result.success &&
+            InferenceResourcePolicy.isAllocationFailure(result.message) &&
+            attempt + 1 < contextAttempts.length) {
+          await engine.dispose();
+          final nextContext = contextAttempts[attempt + 1];
+          final nextOutput = InferenceResourcePolicy.outputLimitForContext(
+            contextSize: nextContext,
+            configuredOutputLimit: runtimeOutputLimit,
+            modelOutputLimit: modelOutputLimit,
+          );
+          resourceConfigurationNotice.value =
+              'The native runtime could not allocate the requested context. '
+              'MaxAI retried with $nextContext context and up to '
+              '$nextOutput output tokens. Saved limits were not changed.';
+          continue;
+        }
+
+        if (result.success) {
+          _engine = engine;
+        } else {
+          await engine.dispose();
+        }
+        loadResult = result;
+        break;
+      }
+
+      final result = loadResult;
+      if (result == null) {
+        throw StateError('No inference context could be created.');
       }
 
       if (!result.success) {
@@ -171,8 +251,13 @@ class InferenceService extends GetxService {
         Get.find<AppLogService>().error(
           'Local model load failed',
           details:
-              'model=$requestedModelName, runtime=$runtime, backend=${result.backend}, message=${result.message}',
+              'model=$requestedModelName, runtime=llama, backend=${result.backend}, message=${result.message}',
         );
+        if (InferenceResourcePolicy.isAllocationFailure(result.message)) {
+          resourceConfigurationNotice.value =
+              InferenceResourcePolicy.allocationFailureMessage(result.message);
+          return 'ERROR: ${resourceConfigurationNotice.value}';
+        }
         return result.message;
       }
 
@@ -182,18 +267,17 @@ class InferenceService extends GetxService {
       modelLoadProgress.value = 1.0;
       loadedModelName.value = activeModelName;
       loadedModelRuntime.value = result.runtime;
-      if (result.runtime == 'llama' || result.runtime == 'litert') {
-        _sessionNativeRuntime = result.runtime;
-      }
       loadedBackend.value = result.backend;
       gpuName.value = result.gpuName;
       gpuLayersUsed.value = result.gpuLayers;
       isGpuAccelerated.value = result.backend == 'gpu' || result.gpuLayers > 0;
-      if (isLiteRt && result.backend == 'gpu') {
-        await _hive.setSetting(AppConstants.keyLiteRtGpuCrashDetected, false);
-      }
       contextTokensUsed.value = 0;
-      contextTokensTotal.value = finalContextSize;
+      contextTokensTotal.value = contextSize;
+      _activeMaxOutputTokens = InferenceResourcePolicy.outputLimitForContext(
+        contextSize: contextSize,
+        configuredOutputLimit: runtimeOutputLimit,
+        modelOutputLimit: modelOutputLimit,
+      );
 
       await _hive.setSetting(AppConstants.keyLocalModelPath, modelPath);
       await _hive.setSetting(
@@ -203,18 +287,21 @@ class InferenceService extends GetxService {
       await _hive.setSetting(
           AppConstants.keyLocalModelBackend, loadedBackend.value);
 
-      if (isLiteRt) {
-        await _hive.setSetting('last_loaded_context_size', finalContextSize);
-      }
-
       return result.message;
     } catch (e) {
+      final failedEngine = _engine;
+      _engine = null;
+      if (failedEngine != null) await failedEngine.dispose();
       isModelLoaded.value = false;
       isLoadingModel.value = false;
       loadingModelName.value = '';
       modelLoadProgress.value = 0.0;
       loadedBackend.value = '';
       Get.find<AppLogService>().error('Failed to load local model', details: e);
+      if (InferenceResourcePolicy.isAllocationFailure(e)) {
+        resourceConfigurationNotice.value =
+            InferenceResourcePolicy.allocationFailureMessage(e);
+      }
       return 'ERROR: Failed to load model — $e';
     }
   }
@@ -237,7 +324,8 @@ class InferenceService extends GetxService {
     gpuName.value = '';
     contextTokensUsed.value = 0;
     contextTokensTotal.value = 0;
-    _sessionNativeRuntime = '';
+    _activeMaxOutputTokens = 0;
+    resourceConfigurationNotice.value = '';
   }
 
   Future<String> generate({
@@ -273,16 +361,6 @@ class InferenceService extends GetxService {
 
     final startTime = DateTime.now();
     DateTime? firstVisibleTokenAt;
-    Timer? tokenFlushTimer;
-    final tokenFlushBuffer = StringBuffer();
-
-    void flushTokenBuffer() {
-      if (tokenFlushBuffer.isEmpty) return;
-      final text = tokenFlushBuffer.toString();
-      tokenFlushBuffer.clear();
-      onToken?.call(text);
-    }
-
     try {
       final temperature = _hive.getSetting<double>(
             AppConstants.keyTemperature,
@@ -290,11 +368,37 @@ class InferenceService extends GetxService {
           ) ??
           AppConstants.defaultTemperature;
 
-      final maxTokens = _hive.getSetting<int>(
+      final configuredMaxTokens = _hive.getSetting<int>(
             AppConstants.keyMaxTokens,
             defaultValue: AppConstants.defaultMaxTokens,
           ) ??
           AppConstants.defaultMaxTokens;
+      final selectedModel = Get.isRegistered<ModelSelectionService>()
+          ? Get.find<ModelSelectionService>().selectedModel.value
+          : null;
+      final contextLimit = contextTokensTotal.value > 0
+          ? contextTokensTotal.value
+          : selectedModel?.maxContextSize ?? AppConstants.defaultContextSize;
+      final modelOutputLimit = selectedModel != null &&
+              selectedModel.filename == loadedModelName.value
+          ? selectedModel.maxOutputTokens
+          : configuredMaxTokens;
+      final maxTokens = math.min(
+        math.min(
+          math.min(configuredMaxTokens, modelOutputLimit),
+          _activeMaxOutputTokens > 0
+              ? _activeMaxOutputTokens
+              : modelOutputLimit,
+        ),
+        math.max(
+          1,
+          InferenceResourcePolicy.outputLimitForContext(
+            contextSize: contextLimit,
+            configuredOutputLimit: modelOutputLimit,
+            modelOutputLimit: modelOutputLimit,
+          ),
+        ),
+      );
 
       final result = await _engine!.generate(
         prompt: prompt,
@@ -315,23 +419,19 @@ class InferenceService extends GetxService {
           if (elapsedSeconds > 0) {
             tokensPerSecond.value = tokenCount.value / elapsedSeconds;
           }
-          if (loadedModelRuntime.value == 'litert') {
-            tokenFlushBuffer.write(token);
-            tokenFlushTimer ??= Timer(const Duration(milliseconds: 60), () {
-              tokenFlushTimer = null;
-              flushTokenBuffer();
-            });
-          } else {
-            onToken?.call(token);
-          }
+          onToken?.call(token);
         },
       );
-      tokenFlushTimer?.cancel();
-      flushTokenBuffer();
-
       await refreshContextInfo();
       isGenerating.value = false;
       generationSource.value = '';
+
+      if (result.startsWith('ERROR:') &&
+          InferenceResourcePolicy.isAllocationFailure(result)) {
+        resourceConfigurationNotice.value =
+            InferenceResourcePolicy.allocationFailureMessage(result);
+        return 'ERROR: ${resourceConfigurationNotice.value}';
+      }
 
       // Detect Tensor SoC + Gemma Q4_K_M corruption: model outputs only
       // special tokens and terminates immediately with empty result.
@@ -354,9 +454,12 @@ class InferenceService extends GetxService {
       isGenerating.value = false;
       generationSource.value = '';
       streamingText.value = '';
-      tokenFlushTimer?.cancel();
-      flushTokenBuffer();
       Get.find<AppLogService>().error('Local generation failed', details: e);
+      if (InferenceResourcePolicy.isAllocationFailure(e)) {
+        resourceConfigurationNotice.value =
+            InferenceResourcePolicy.allocationFailureMessage(e);
+        return 'ERROR: ${resourceConfigurationNotice.value}';
+      }
       return 'ERROR: $e';
     }
   }
@@ -411,107 +514,5 @@ class InferenceService extends GetxService {
     } catch (_) {
       return false;
     }
-  }
-
-  Future<platform.LoadResult> _loadModelOnEngine({
-    required String modelPath,
-    required String? modelRuntime,
-    required int contextSize,
-    required String deviceTier,
-    bool isTensorSoC = false,
-    required String liteRtPerformanceMode,
-    required bool forceLiteRtCpu,
-    required bool clearLiteRtCache,
-    required bool markLiteRtGpuPending,
-    required bool enableLiteRtVision,
-  }) async {
-    var gpuLoadFailed = false;
-    try {
-      if (markLiteRtGpuPending) {
-        await _hive.setSetting(AppConstants.keyLiteRtGpuLoadPending, true);
-      }
-      final result = await _engine!.loadModel(
-        modelPath: modelPath,
-        modelRuntime: modelRuntime,
-        contextSize: contextSize,
-        deviceTier: deviceTier,
-        isTensorSoC: isTensorSoC,
-        liteRtPerformanceMode: liteRtPerformanceMode,
-        forceLiteRtCpu: forceLiteRtCpu,
-        clearLiteRtCache: clearLiteRtCache,
-        enableLiteRtVision: enableLiteRtVision,
-        onProgress: (p) => modelLoadProgress.value = _normalizeProgress(p),
-      );
-      if (result.success ||
-          !markLiteRtGpuPending ||
-          liteRtPerformanceMode != 'auto_fast') {
-        return result;
-      }
-
-      await _hive.setSetting(AppConstants.keyLiteRtGpuLoadPending, false);
-      await _hive.setSetting(AppConstants.keyLiteRtGpuCrashDetected, true);
-      modelLoadProgress.value = 0.0;
-      return await _engine!.loadModel(
-        modelPath: modelPath,
-        modelRuntime: modelRuntime,
-        contextSize: contextSize,
-        deviceTier: deviceTier,
-        isTensorSoC: isTensorSoC,
-        liteRtPerformanceMode: liteRtPerformanceMode,
-        forceLiteRtCpu: true,
-        clearLiteRtCache: true,
-        enableLiteRtVision: enableLiteRtVision,
-        onProgress: (p) => modelLoadProgress.value = _normalizeProgress(p),
-      );
-    } catch (e) {
-      if (markLiteRtGpuPending && liteRtPerformanceMode == 'auto_fast') {
-        await _hive.setSetting(AppConstants.keyLiteRtGpuLoadPending, false);
-        await _hive.setSetting(AppConstants.keyLiteRtGpuCrashDetected, true);
-        try {
-          modelLoadProgress.value = 0.0;
-          return await _engine!.loadModel(
-            modelPath: modelPath,
-            modelRuntime: modelRuntime,
-            contextSize: contextSize,
-            deviceTier: deviceTier,
-            isTensorSoC: isTensorSoC,
-            liteRtPerformanceMode: liteRtPerformanceMode,
-            forceLiteRtCpu: true,
-            clearLiteRtCache: true,
-            enableLiteRtVision: enableLiteRtVision,
-            onProgress: (p) => modelLoadProgress.value = _normalizeProgress(p),
-          );
-        } catch (cpuError) {
-          return platform.LoadResult(
-            success: false,
-            message: 'ERROR: Failed to load model - $cpuError',
-          );
-        }
-      }
-      gpuLoadFailed = true;
-      return platform.LoadResult(
-        success: false,
-        message: 'ERROR: Failed to load model - $e',
-      );
-    } finally {
-      if (markLiteRtGpuPending) {
-        if (gpuLoadFailed) {
-          await _hive.setSetting(AppConstants.keyLiteRtGpuCrashDetected, true);
-        }
-        await _hive.setSetting(AppConstants.keyLiteRtGpuLoadPending, false);
-      }
-    }
-  }
-
-  double _normalizeProgress(double progress) {
-    if (progress.isNaN || progress.isInfinite) return 0.0;
-    final normalized = progress > 1 ? progress / 100 : progress;
-    return normalized.clamp(0.0, 1.0).toDouble();
-  }
-
-  String _runtimeFor(String modelPath, String? modelRuntime) {
-    final runtime = modelRuntime?.toLowerCase();
-    if (runtime == 'litert' || runtime == 'llama') return runtime!;
-    return modelPath.toLowerCase().endsWith('.litertlm') ? 'litert' : 'llama';
   }
 }

@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
-import 'package:flutter/foundation.dart' show compute, kIsWeb;
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:get/get.dart';
@@ -12,28 +12,32 @@ import 'package:path_provider/path_provider.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:uuid/uuid.dart';
 import '../controllers/settings_controller.dart';
-import '../core/constants.dart';
 import '../models/chat_message.dart';
 import '../models/chat_session.dart';
-import '../ffi/sd_ffi_bindings.dart';
 import '../services/hive_service.dart';
 import '../services/inference_service.dart';
 import '../services/cloud_service.dart';
-import '../services/local_image_service.dart';
 import '../services/app_log_service.dart';
-import '../services/image_generation_notification_service.dart';
 import '../services/document_extractor_service.dart';
+import '../services/local_chat_availability.dart';
 import '../utils/thought_parser.dart';
 
 const int _visionImageMaxSide = 768;
 const int _visionImageJpegQuality = 72;
+
+class _ChatGenerationFailure implements Exception {
+  const _ChatGenerationFailure(this.details);
+
+  final String details;
+}
 
 Uint8List? _resizeVisionImageBytes(Map<String, dynamic> args) {
   final bytes = args['bytes'] as Uint8List;
   final decoded = img.decodeImage(bytes);
   if (decoded == null) return null;
 
-  final longestSide = decoded.width > decoded.height ? decoded.width : decoded.height;
+  final longestSide =
+      decoded.width > decoded.height ? decoded.width : decoded.height;
   if (longestSide <= _visionImageMaxSide) {
     return bytes;
   }
@@ -71,13 +75,6 @@ class ChatController extends GetxController {
   final streamingResponse = ''.obs;
   final isStreaming = false.obs;
   final streamingAttachmentType = Rxn<String>();
-
-  // Image generation progress (lightweight, replaces text-heavy updates)
-  final imageGenStep = 0.obs;
-  final imageGenTotal = 0.obs;
-  final imageGenEstimatedSecs = 0.obs;
-  final imageGenStartTime = Rxn<DateTime>();
-  final imageGenDecoding = false.obs;
 
   // Speech-to-text
   final isListening = false.obs;
@@ -131,15 +128,10 @@ class ChatController extends GetxController {
         }
         if (!sttAvailable.value) return;
       }
-      await _speech.listen(
-        onResult: (result) {
-          textController.text = result.recognizedWords;
-          inputText.value = result.recognizedWords;
-        },
-        listenFor: const Duration(seconds: 60),
-        pauseFor: const Duration(seconds: 4),
-        localeId: 'en_US',
-      );
+      await _speech.listen(onResult: (result) {
+        textController.text = result.recognizedWords;
+        inputText.value = result.recognizedWords;
+      });
       isListening.value = true;
     } catch (_) {
       isListening.value = false;
@@ -246,40 +238,56 @@ class ChatController extends GetxController {
   void _checkVisionSupport() {
     final s = Get.find<SettingsController>();
     if (s.inferenceMode.value != 'cloud') return;
-    
+
     final provider = s.cloudProvider.value;
     String modelName = '';
     switch (provider) {
-      case 'anthropic': modelName = s.anthropicModel.value; break;
-      case 'google': modelName = s.googleModel.value; break;
-      case 'kimi': modelName = s.kimiModel.value; break;
-      case 'stability': modelName = s.stabilityModel.value; break;
-      case 'nvidia': modelName = s.nvidiaModel.value; break;
-      case 'openrouter': modelName = s.openRouterModel.value; break;
-      case 'deepseek': modelName = s.deepSeekModel.value; break;
-      case 'custom': modelName = s.customCloudModel.value; break;
-      default: modelName = s.openaiModel.value; break;
+      case 'anthropic':
+        modelName = s.anthropicModel.value;
+        break;
+      case 'google':
+        modelName = s.googleModel.value;
+        break;
+      case 'kimi':
+        modelName = s.kimiModel.value;
+        break;
+      case 'nvidia':
+        modelName = s.nvidiaModel.value;
+        break;
+      case 'openrouter':
+        modelName = s.openRouterModel.value;
+        break;
+      case 'deepseek':
+        modelName = s.deepSeekModel.value;
+        break;
+      case 'custom':
+        modelName = s.customCloudModel.value;
+        break;
+      default:
+        modelName = s.openaiModel.value;
+        break;
     }
-    
+
     final model = modelName.toLowerCase();
-    
+
     // Known vision keywords in cloud model names
-    final isVision = model.contains('vision') || 
-                     model.contains('-vl') || 
-                     model.contains('gpt-4o') || 
-                     model.contains('claude-3') || 
-                     model.contains('gemini') || 
-                     model.contains('pixtral') || 
-                     model.contains('llava') ||
-                     model.contains('omni');
-                     
+    final isVision = model.contains('vision') ||
+        model.contains('-vl') ||
+        model.contains('gpt-4o') ||
+        model.contains('claude-3') ||
+        model.contains('gemini') ||
+        model.contains('pixtral') ||
+        model.contains('llava') ||
+        model.contains('omni');
+
     if (!isVision) {
       Get.snackbar(
         'Warning: Text-Only Model',
         'The selected model ($modelName) might not support images. If you get an error, switch to a vision model (like Gemini, GPT-4o, or Claude 3).',
         snackPosition: SnackPosition.TOP,
         duration: const Duration(seconds: 6),
-        backgroundColor: const Color(0xFFFF9500).withValues(alpha: 0.95), // Warning Orange
+        backgroundColor:
+            const Color(0xFFFF9500).withValues(alpha: 0.95), // Warning Orange
         colorText: Colors.white,
         margin: const EdgeInsets.all(12),
       );
@@ -320,7 +328,7 @@ class ChatController extends GetxController {
           'ts',
           'py'
         ],
-        withData: kIsWeb,
+        withData: false,
       );
       if (result == null) return;
       final file = result.files.single;
@@ -385,7 +393,8 @@ class ChatController extends GetxController {
               'Document extraction failed',
               details: e,
             );
-            selectedFileContent.value = '[Could not extract text from ${selectedFileName.value}: $e]';
+            selectedFileContent.value =
+                '[Could not extract text from ${selectedFileName.value}: $e]';
           }
         }
       } else if (fileType == 'text') {
@@ -450,6 +459,20 @@ class ChatController extends GetxController {
   Future<void> sendMessage() async {
     if (isLoading.value || isStreaming.value) return;
 
+    final inferenceMode = Get.find<SettingsController>().inferenceMode.value;
+    final modelLoaded = Get.find<InferenceService>().isModelLoaded.value;
+    if (!LocalChatAvailability.canSend(
+      inferenceMode: inferenceMode,
+      isModelLoaded: modelLoaded,
+    )) {
+      Get.snackbar(
+        'Local Model Not Ready',
+        'Load the selected model from Models before starting a local chat.',
+        snackPosition: SnackPosition.BOTTOM,
+      );
+      return;
+    }
+
     final text = textController.text.trim();
     final hasAttachment =
         selectedImagePath.value != null || selectedFileName.value != null;
@@ -475,7 +498,7 @@ class ChatController extends GetxController {
     // Encode image to base64 if it's not already pre-encoded, so the message
     // saved in history contains the image bytes and is 100% stable.
     String? imgBase64 = imageBase64;
-    if (imgBase64 == null && imagePath != null && !kIsWeb) {
+    if (imgBase64 == null && imagePath != null) {
       try {
         imgBase64 = base64Encode(await File(imagePath).readAsBytes());
       } catch (_) {}
@@ -498,7 +521,7 @@ class ChatController extends GetxController {
     messages.add(userMsg);
     _hive.saveMessage(userMsg.id, userMsg.toMap());
 
-    // Clear input preview UI state — but KEEP the physical file on disk 
+    // Clear input preview UI state — but KEEP the physical file on disk
     // because the native inference engine needs to read it during generation.
     textController.clear();
     inputText.value = '';
@@ -547,12 +570,6 @@ class ChatController extends GetxController {
         }
       }
 
-      final inferenceMode = _hive.getSetting(
-            AppConstants.keyInferenceMode,
-            defaultValue: 'local',
-          ) ??
-          'local';
-
       String rawResponse;
 
       // Build conversation history
@@ -567,105 +584,21 @@ class ChatController extends GetxController {
           .toList();
 
       if (inferenceMode == 'local') {
-        final localImage = Get.find<LocalImageService>();
+        final inference = Get.find<InferenceService>();
 
-        if (localImage.isModelLoaded.value) {
-          // Local image generation
-          final settings = Get.find<SettingsController>();
-          final imageNotifications =
-              Get.find<ImageGenerationNotificationService>();
-          final steps = _hive.getSetting<int>(AppConstants.keyImageSteps,
-              defaultValue: AppConstants.defaultImageSteps) ??
-              AppConstants.defaultImageSteps;
-          final sizeSetting = settings.imageGenSize.value;
-          final sizeLabel =
-              sizeSetting == 0 ? 'Auto size' : '${sizeSetting}x$sizeSetting';
-          final backendLabel = localImage.currentBackend.value == Backend.cpu
-              ? 'CPU'
-              : localImage.currentBackend.value.displayName
-                  .split(' ')
-                  .first
-                  .toUpperCase();
-          imageGenStep.value = 0;
-          imageGenTotal.value = steps;
-          imageGenEstimatedSecs.value = 0;
-          imageGenStartTime.value = DateTime.now();
-          imageGenDecoding.value = false;
-          await imageNotifications.start(
-            modelName: localImage.loadedModelName.value,
-            backend: backendLabel,
-            steps: steps,
-            sizeLabel: sizeLabel,
-          );
-          print('[ChatController] Starting image generation for: $text');
-          final pngBytes = await localImage.generateImage(
-            prompt: text,
-            onProgress: (step, total) {
-              print('[ChatController] Progress callback: step=$step, total=$total');
-              imageGenStep.value = step;
-              imageGenTotal.value = total;
-              if (step >= total && total > 0) {
-                imageGenDecoding.value = true;
-                print('[ChatController] Sampling complete, VAE decode in progress');
-                imageNotifications.decoding();
-              }
-              if (step > 0 && total > 0 && step < total) {
-                final start = imageGenStartTime.value;
-                if (start != null) {
-                  final elapsed = DateTime.now().difference(start).inMilliseconds;
-                  final avgMsPerStep = elapsed / step;
-                  final remainingSteps = total - step;
-                  imageGenEstimatedSecs.value =
-                      (avgMsPerStep * remainingSteps / 1000).ceil();
-                }
-              }
-              imageNotifications.update(
-                step: step,
-                total: total,
-                etaSeconds: imageGenEstimatedSecs.value,
-                elapsedSeconds: imageGenStartTime.value == null
-                    ? 0
-                    : DateTime.now()
-                        .difference(imageGenStartTime.value!)
-                        .inSeconds,
-              );
-              _scrollToBottom();
-            },
-          );
-          // Calculate total generation time
-          final genDurationMs = imageGenStartTime.value != null
-              ? DateTime.now().difference(imageGenStartTime.value!).inMilliseconds
-              : null;
-          print('[ChatController] generateImage returned, bytes=${pngBytes?.length}, duration=${genDurationMs}ms');
-
-          if (pngBytes != null) {
-            await imageNotifications.complete(durationMs: genDurationMs ?? 0);
-            rawResponse = '[IMAGE_BASE64]${base64Encode(pngBytes)}';
-          } else {
-            await imageNotifications.failed();
-            rawResponse = '❌ Local image generation failed.';
-          }
-        } else {
-          final inference = Get.find<InferenceService>();
-
-          // LiteRT models can consume image/audio attachments. GGUF currently
-          // returns a clear unsupported message from the inference layer.
-
-          rawResponse = await inference.generate(
-            prompt: effectiveText,
-            systemPrompt: _effectiveSystemPrompt,
-            conversationHistory: history,
-            source: 'chat',
-            imagePath: imagePath,
-            audioPath: fileType == 'audio' ? filePath : null,
-            onToken: (token) {
-              // Real-time streaming update
-              streamingResponse.value += token;
-              trackThoughtTiming();
-              _scrollToBottom();
-            },
-          );
-        }
+        rawResponse = await inference.generate(
+          prompt: effectiveText,
+          systemPrompt: _effectiveSystemPrompt,
+          conversationHistory: history,
+          source: 'chat',
+          imagePath: imagePath,
+          audioPath: fileType == 'audio' ? filePath : null,
+          onToken: (token) {
+            streamingResponse.value += token;
+            trackThoughtTiming();
+            _scrollToBottom();
+          },
+        );
       } else {
         final cloud = Get.find<CloudService>();
         final apiMessages = [
@@ -683,6 +616,17 @@ class ChatController extends GetxController {
         );
       }
 
+      if (rawResponse.trimLeft().startsWith('ERROR:')) {
+        throw _ChatGenerationFailure(rawResponse);
+      }
+
+      rawResponse = visibleAnswerText(rawResponse);
+      if (rawResponse.isEmpty) {
+        throw const _ChatGenerationFailure(
+          'The model returned no visible answer.',
+        );
+      }
+
       if (thoughtStartedAt != null && thoughtDurationSeconds == null) {
         thoughtDurationSeconds =
             DateTime.now().difference(thoughtStartedAt!).inSeconds;
@@ -697,20 +641,6 @@ class ChatController extends GetxController {
       isStreaming.value = false;
       streamingAttachmentType.value = null;
       streamingResponse.value = '';
-      imageGenStep.value = 0;
-      imageGenTotal.value = 0;
-      imageGenDecoding.value = false;
-
-      String? outImageBase64;
-      if (rawResponse.startsWith('[IMAGE_BASE64]')) {
-        outImageBase64 = rawResponse.substring('[IMAGE_BASE64]'.length);
-        rawResponse = 'Here is your generated image:';
-      }
-
-      // Calculate total generation time for image gen
-      final genDurationMs = imageGenStartTime.value != null
-          ? DateTime.now().difference(imageGenStartTime.value!).inMilliseconds
-          : null;
 
       // Display response directly (no command processing)
       final aiMsg = ChatMessage(
@@ -718,14 +648,11 @@ class ChatController extends GetxController {
         chatId: currentSessionId.value,
         role: 'assistant',
         content: rawResponse,
-        imageBase64: outImageBase64,
         tokensPerSec: tps,
         thoughtDurationSeconds: thoughtDurationSeconds,
-        imageGenDurationMs: genDurationMs,
       );
       messages.add(aiMsg);
       _hive.saveMessage(aiMsg.id, aiMsg.toMap());
-      imageGenStartTime.value = null;
 
       // Update session
       final session =
@@ -741,22 +668,14 @@ class ChatController extends GetxController {
       isStreaming.value = false;
       streamingAttachmentType.value = null;
       streamingResponse.value = '';
-      imageGenStep.value = 0;
-      imageGenTotal.value = 0;
-      imageGenDecoding.value = false;
-      if (imageGenStartTime.value != null) {
-        await Get.find<ImageGenerationNotificationService>().failed();
-      }
-      imageGenStartTime.value = null;
-      Get.find<AppLogService>().error('Chat response failed', details: e);
-      final errorMsg = ChatMessage(
-        id: _uuid.v4(),
-        chatId: currentSessionId.value,
-        role: 'assistant',
-        content: '❌ Error: $e',
+      final details =
+          e is _ChatGenerationFailure ? e.details : e.toString();
+      Get.find<AppLogService>().error('Chat response failed', details: details);
+      Get.snackbar(
+        'Response Unavailable',
+        'MaxAI could not generate a response. Check the model status or connection and try again.',
+        snackPosition: SnackPosition.BOTTOM,
       );
-      messages.add(errorMsg);
-      _hive.saveMessage(errorMsg.id, errorMsg.toMap());
     }
 
     if (generationId == _generationSerial) {
@@ -780,14 +699,7 @@ class ChatController extends GetxController {
     isStreaming.value = false;
     streamingAttachmentType.value = null;
     streamingResponse.value = '';
-    Get.find<ImageGenerationNotificationService>().cancel();
-    imageGenStep.value = 0;
-    imageGenTotal.value = 0;
-    imageGenEstimatedSecs.value = 0;
-    imageGenStartTime.value = null;
-    imageGenDecoding.value = false;
     unawaited(Get.find<InferenceService>().stopGeneration());
-    Get.find<LocalImageService>().cancelGeneration();
   }
 
   void _saveAssistantMessage({

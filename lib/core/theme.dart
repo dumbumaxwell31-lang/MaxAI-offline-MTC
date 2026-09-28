@@ -12,7 +12,7 @@ class AppTheme {
   static ThemeData _buildTheme(Brightness brightness) {
     final isDark = brightness == Brightness.dark;
 
-    // Apple system backgrounds
+    // Platform-neutral system backgrounds
     final bg = isDark ? Colors.black : Colors.white;
     final surface = isDark ? const Color(0xFF1C1C1E) : const Color(0xFFF2F2F7);
     final surfaceHigh = isDark ? const Color(0xFF2C2C2E) : const Color(0xFFE5E5EA);

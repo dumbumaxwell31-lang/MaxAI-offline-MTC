@@ -9,6 +9,7 @@ class ThoughtDisclosure extends StatefulWidget {
   final bool isThinking;
   final int? durationSeconds;
   final MarkdownStyleSheet styleSheet;
+  final bool renderMarkdown;
 
   const ThoughtDisclosure({
     super.key,
@@ -16,6 +17,7 @@ class ThoughtDisclosure extends StatefulWidget {
     required this.styleSheet,
     this.isThinking = false,
     this.durationSeconds,
+    this.renderMarkdown = true,
   });
 
   @override
@@ -100,7 +102,8 @@ class _ThoughtDisclosureState extends State<ThoughtDisclosure>
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final muted = Theme.of(context).hintColor;
-    final accentColor = isDark ? const Color(0xFF0A84FF) : const Color(0xFF007AFF);
+    final accentColor =
+        isDark ? const Color(0xFF0A84FF) : const Color(0xFF007AFF);
 
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
@@ -168,14 +171,19 @@ class _ThoughtDisclosureState extends State<ThoughtDisclosure>
           // Content
           SizeTransition(
             sizeFactor: _expandAnimation,
-            axisAlignment: -1.0,
+            alignment: Alignment.topCenter,
             child: Padding(
               padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-              child: MarkdownBody(
-                data: widget.thought.trim(),
-                selectable: true,
-                styleSheet: widget.styleSheet,
-              ),
+              child: widget.renderMarkdown
+                  ? MarkdownBody(
+                      data: widget.thought.trim(),
+                      selectable: true,
+                      styleSheet: widget.styleSheet,
+                    )
+                  : Text(
+                      widget.thought.trim(),
+                      style: widget.styleSheet.p,
+                    ),
             ),
           ),
         ],

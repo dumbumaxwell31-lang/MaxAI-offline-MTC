@@ -1,11 +1,8 @@
-import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../controllers/home_controller.dart';
 import 'chat_view.dart';
-import 'model_view.dart';
-import 'server_view.dart';
 import 'settings_view.dart';
 
 class HomeView extends GetView<HomeController> {
@@ -17,23 +14,12 @@ class HomeView extends GetView<HomeController> {
         activeIcon: Icons.bubble_chart,
         label: 'Chat'),
     _NavItem(
-        icon: Icons.arrow_downward_rounded,
-        activeIcon: Icons.arrow_downward_rounded,
-        label: 'Models'),
-    _NavItem(
-        icon: Icons.dns_outlined,
-        activeIcon: Icons.dns_rounded,
-        label: 'Server'),
-    _NavItem(
         icon: Icons.settings_outlined,
         activeIcon: Icons.settings,
         label: 'Settings'),
   ];
 
-  bool get _isWide {
-    if (kIsWeb) return true;
-    return Get.width >= 800;
-  }
+  bool get _isWide => Get.width >= 800;
 
   @override
   Widget build(BuildContext context) {
@@ -48,9 +34,7 @@ class HomeView extends GetView<HomeController> {
           index: controller.currentTab.value,
           children: const [
             ChatView(),
-            ModelView(),
-            ServerView(),
-            SettingsView()
+            SettingsView(),
           ],
         );
         if (_isWide) {

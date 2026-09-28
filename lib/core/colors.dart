@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 class AppColors {
   AppColors._();
 
-  // ── Apple System Colors ──
+  // System colors
   static const Color primary = Color(0xFF007AFF);
   static const Color primaryDim = Color(0xFF0A84FF);
   static const Color secondary = Color(0xFF5856D6);

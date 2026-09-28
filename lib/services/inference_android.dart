@@ -1,11 +1,12 @@
 import 'dart:async';
-import 'dart:io' show Platform, Directory;
-import 'package:path_provider/path_provider.dart';
-import 'package:flutter_litert_lm/flutter_litert_lm.dart';
+import 'dart:io' show Platform;
+import 'dart:math' as math;
 import 'package:llama_flutter_android/llama_flutter_android.dart';
+import '../utils/thought_parser.dart';
+import '../utils/local_prompt_window.dart';
 
 /// Whether the current platform supports local inference.
-bool get supportsLocalInference => Platform.isAndroid || Platform.isIOS;
+bool get supportsLocalInference => Platform.isAndroid;
 
 /// Result from model loading.
 class LoadResult {
@@ -25,49 +26,27 @@ class LoadResult {
   });
 }
 
-/// Android & iOS inference engine — wraps llama_flutter_android.
+/// Android inference engine that wraps llama_flutter_android.
 class InferenceEngine {
   LlamaController? _controller;
-  LiteLmEngine? _liteEngine;
-  LiteLmConversation? _liteConversation;
   StreamSubscription? _subscription;
   StreamSubscription? _loadProgressSub;
   Timer? _idleTimer;
   void Function()? _onStop;
-  bool _isLiteRt = false;
   bool _disposed = false;
   bool _hasLoadedModel = false;
-  String? _liteConversationSystemPrompt;
-  double? _liteConversationTemperature;
-  bool _liteConversationHasMessages = false;
+  int _contextSize = 1024;
+  int _outputTokenLimit = 256;
 
   Future<LoadResult> loadModel({
     required String modelPath,
-    String? modelRuntime,
     required int contextSize,
     required String deviceTier,
     bool isTensorSoC = false,
-    String liteRtPerformanceMode = 'auto_fast',
-    bool forceLiteRtCpu = false,
-    bool clearLiteRtCache = false,
-    bool enableLiteRtVision = false,
     void Function(double)? onProgress,
   }) async {
     _disposed = false;
-    final runtime = _runtimeFor(modelPath, modelRuntime);
-    if (runtime == 'litert') {
-      return _loadLiteRtModel(
-        modelPath,
-        contextSize: contextSize,
-        performanceMode: liteRtPerformanceMode,
-        forceCpu: forceLiteRtCpu,
-        clearCache: clearLiteRtCache,
-        enableVision: enableLiteRtVision,
-        onProgress: onProgress,
-      );
-    }
-
-    _isLiteRt = false;
+    _contextSize = contextSize;
     _controller = LlamaController();
 
     // ── GPU Detection ──
@@ -130,6 +109,7 @@ class InferenceEngine {
     }
 
     // ── Load Progress ──
+    threads = threads.clamp(1, Platform.numberOfProcessors);
     await _loadProgressSub?.cancel();
     _loadProgressSub = null;
     try {
@@ -139,13 +119,26 @@ class InferenceEngine {
     } catch (_) {}
 
     // ── Load ──
-    await _controller!.loadModel(
-      modelPath: modelPath,
-      threads: threads,
-      contextSize: contextSize,
-      gpuLayers: gpuLayers,
-    );
-    _hasLoadedModel = true;
+    try {
+      await _controller!.loadModel(
+        modelPath: modelPath,
+        threads: threads,
+        contextSize: contextSize,
+        gpuLayers: gpuLayers,
+      );
+      _hasLoadedModel = true;
+    } catch (error) {
+      if (!error.toString().toLowerCase().contains('model already loaded')) {
+        await _loadProgressSub?.cancel();
+        _loadProgressSub = null;
+        try {
+          await _controller?.dispose();
+        } catch (_) {}
+        _controller = null;
+        _disposed = true;
+      }
+      rethrow;
+    }
 
     final accel = gpuLayers > 0
         ? 'GPU ($gpuLayers layers, $gpuNameStr)'
@@ -159,129 +152,6 @@ class InferenceEngine {
       gpuLayers: gpuLayers,
       runtime: 'llama',
       backend: gpuLayers > 0 ? 'gpu' : 'cpu',
-    );
-  }
-
-  Future<LoadResult> _loadLiteRtModel(
-    String modelPath, {
-    required int contextSize,
-    required String performanceMode,
-    required bool forceCpu,
-    required bool clearCache,
-    required bool enableVision,
-    void Function(double)? onProgress,
-  }) async {
-    if (!Platform.isAndroid) {
-      throw UnsupportedError(
-          'LiteRT-LM is enabled for Android only in this app.');
-    }
-
-    _isLiteRt = true;
-    _controller = null;
-
-    final tempDir = await getTemporaryDirectory();
-    final cacheDir = Directory('${tempDir.path}/litert_cache');
-    final backend = forceCpu || performanceMode == 'cpu_safe'
-        ? LiteLmBackend.cpu
-        : LiteLmBackend.gpu;
-    final backendLabel = backend == LiteLmBackend.gpu ? 'GPU' : 'CPU';
-
-    try {
-      onProgress?.call(0.05);
-      if (clearCache && await cacheDir.exists()) {
-        try {
-          await cacheDir.delete(recursive: true);
-        } catch (_) {}
-      }
-      await cacheDir.create(recursive: true);
-      onProgress?.call(0.18);
-
-      _liteEngine = await _createLiteRtEngine(
-        modelPath: modelPath,
-        contextSize: contextSize,
-        cacheDir: cacheDir.path,
-        backend: backend,
-        enableVision: enableVision,
-      );
-      _hasLoadedModel = true;
-      onProgress?.call(0.92);
-      print(
-          '[Inference] LiteRT-LM loaded with $backendLabel backend, ctx=$contextSize');
-      return LoadResult(
-        success: true,
-        message: 'LiteRT-LM model loaded ($backendLabel backend).',
-        gpuName: backend == LiteLmBackend.gpu ? 'LiteRT GPU' : '',
-        gpuLayers: backend == LiteLmBackend.gpu ? 1 : 0,
-        runtime: 'litert',
-        backend: backend.name,
-      );
-    } catch (error) {
-      print('[Inference] LiteRT-LM load failed: $error');
-      final errorStr = error.toString();
-      if (errorStr.contains('TF_LITE_VISION_ENCODER')) {
-        return LoadResult(
-          success: false,
-          message:
-              'This LiteRT-LM file is text-only, but it was loaded as a vision model. Turn off Vision for this model or re-import it as a normal chat model.',
-        );
-      }
-      if (enableVision && errorStr.contains('exactly one signature but got')) {
-        print(
-            '[Inference] Vision encoder signature mismatch. Falling back to text-only mode.');
-        try {
-          _liteEngine = await _createLiteRtEngine(
-            modelPath: modelPath,
-            contextSize: contextSize,
-            cacheDir: cacheDir.path,
-            backend: backend,
-            enableVision: false,
-          );
-          _hasLoadedModel = true;
-          onProgress?.call(0.92);
-          return LoadResult(
-            success: true,
-            message:
-                'Model loaded in text-only mode. Its vision features are incompatible with the LiteRT engine (expected 1 signature, found multiple).',
-            gpuName: backend == LiteLmBackend.gpu ? 'LiteRT GPU' : '',
-            gpuLayers: backend == LiteLmBackend.gpu ? 1 : 0,
-            runtime: 'litert',
-            backend: backend.name,
-          );
-        } catch (fallbackError) {
-          print('[Inference] LiteRT-LM fallback load failed: $fallbackError');
-          return LoadResult(
-            success: false,
-            message: 'LiteRT load failed: $fallbackError',
-          );
-        }
-      }
-      if (errorStr.contains('exactly one signature but got')) {
-        return LoadResult(
-          success: false,
-          message:
-              'This vision model is incompatible with the LiteRT engine (expected 1 signature, found multiple). Please try a standard GGUF model or a text-only LiteRT model instead.',
-        );
-      }
-      rethrow;
-    }
-  }
-
-  Future<LiteLmEngine> _createLiteRtEngine({
-    required String modelPath,
-    required int contextSize,
-    required String cacheDir,
-    required LiteLmBackend backend,
-    required bool enableVision,
-  }) {
-    return LiteLmEngine.create(
-      LiteLmEngineConfig(
-        modelPath: modelPath,
-        backend: backend,
-        cacheDir: cacheDir,
-        visionBackend: enableVision ? LiteLmBackend.cpu : null,
-        audioBackend: null,
-        maxNumTokens: contextSize,
-      ),
     );
   }
 
@@ -302,25 +172,13 @@ class InferenceEngine {
     String? audioPath,
     void Function(String token)? onToken,
   }) async {
-    if (_isLiteRt) {
-      return _generateLiteRt(
-        prompt: prompt,
-        conversationHistory: conversationHistory,
-        systemPrompt: systemPrompt,
-        maxTokens: maxTokens,
-        temperature: temperature,
-        imagePath: imagePath,
-        audioPath: audioPath,
-        onToken: onToken,
-      );
-    }
-
     if (_controller == null) throw Exception('No model loaded');
+    _outputTokenLimit = maxTokens;
     if (imagePath != null && imagePath.isNotEmpty) {
-      return 'GGUF image input is not available in this build yet. This llama runtime is text-only right now: it does not load a matching mmproj vision projector or send image pixels into llama.cpp. Use a LiteRT vision model for image understanding.';
+      return 'Image input is not supported by local text models in this build.';
     }
     if (audioPath != null && audioPath.isNotEmpty) {
-      return 'GGUF audio input is not available in this build yet. Text files can be read when their content is attached, but audio needs a model/runtime path that supports audio input.';
+      return 'Audio input is not supported by local text models in this build.';
     }
 
     final completer = Completer<String>();
@@ -337,25 +195,49 @@ class InferenceEngine {
       }
     }
 
-    _onStop = () {
-      finish(buffer.toString());
-    };
+    final qwen3Model = modelName.toLowerCase().contains('qwen3');
+    final thoughtFilter = qwen3Model ? ThoughtOutputFilter() : null;
+
+    void emitFilteredTail() {
+      final tail = thoughtFilter?.finish() ?? '';
+      if (tail.isEmpty) return;
+      buffer.write(tail);
+      onToken?.call(tail);
+    }
+
+    void finishWithVisibleText(String result) {
+      if (result == buffer.toString()) {
+        emitFilteredTail();
+        result = buffer.toString();
+      }
+      finish(result);
+    }
+
+    _onStop = () => finishWithVisibleText(buffer.toString());
+
+    // Each request contains the full conversation, so discard the previous KV cache.
+    await _controller!.clearContext();
 
     // ── Use generateChat() for native template handling ──
     Stream<String>? stream;
     try {
       final messages = _buildChatMessages(
-          prompt, conversationHistory, systemPrompt,
-          imagePath: imagePath);
+        prompt,
+        conversationHistory,
+        systemPrompt,
+        imagePath: imagePath,
+        qwen3Model: qwen3Model,
+      );
       stream = _controller!.generateChat(
         messages: messages,
         template: null,
         maxTokens: maxTokens,
         temperature: temperature,
-        topP: 0.9,
-        topK: 40,
-        minP: 0.05,
+        topP: qwen3Model ? 0.8 : 0.9,
+        topK: qwen3Model ? 20 : 40,
+        minP: qwen3Model ? 0 : 0.05,
         repeatPenalty: 1.1,
+        presencePenalty: qwen3Model ? 1.5 : 0,
         repeatLastN: 64,
       );
       print('[Inference] generateChat() started (${messages.length} messages)');
@@ -371,10 +253,11 @@ class InferenceEngine {
         prompt: fullPrompt,
         maxTokens: maxTokens,
         temperature: temperature,
-        topP: 0.9,
-        topK: 40,
-        minP: 0.05,
+        topP: qwen3Model ? 0.8 : 0.9,
+        topK: qwen3Model ? 20 : 40,
+        minP: qwen3Model ? 0 : 0.05,
         repeatPenalty: 1.1,
+        presencePenalty: qwen3Model ? 1.5 : 0,
         repeatLastN: 64,
       );
     }
@@ -387,18 +270,20 @@ class InferenceEngine {
         }
         final clean = _sanitizeGemmaGarbage(token);
         if (clean.isEmpty) return;
-        buffer.write(clean);
+        final visible = thoughtFilter?.add(clean) ?? clean;
+        if (visible.isEmpty) return;
+        buffer.write(visible);
         tokenCount++;
-        onToken?.call(clean);
+        onToken?.call(visible);
         _idleTimer?.cancel();
         _idleTimer = Timer(const Duration(seconds: 5), () {
           print('[Inference] Idle timeout — $tokenCount tokens');
-          finish(buffer.toString());
+          finishWithVisibleText(buffer.toString());
         });
       },
       onDone: () {
         print('[Inference] Stream onDone — $tokenCount tokens total');
-        finish(buffer.toString());
+        finishWithVisibleText(buffer.toString());
       },
       onError: (error) {
         print('[Inference] Stream error: $error');
@@ -409,7 +294,7 @@ class InferenceEngine {
     // Prefill timeout
     _idleTimer = Timer(const Duration(seconds: 60), () {
       if (tokenCount == 0) {
-        finish(
+        finishWithVisibleText(
             'ERROR: Model did not respond. Try a smaller model or shorter conversation.');
       }
     });
@@ -418,204 +303,12 @@ class InferenceEngine {
     Future.delayed(const Duration(seconds: 180), () {
       if (!completed) {
         final partial = buffer.toString();
-        finish(partial.isEmpty ? 'ERROR: Generation timed out.' : partial);
+        finishWithVisibleText(
+            partial.isEmpty ? 'ERROR: Generation timed out.' : partial);
       }
     });
 
     return await completer.future;
-  }
-
-  Future<String> _generateLiteRt({
-    required String prompt,
-    List<Map<String, String>>? conversationHistory,
-    required String systemPrompt,
-    required int maxTokens,
-    required double temperature,
-    String? imagePath,
-    String? audioPath,
-    void Function(String token)? onToken,
-  }) async {
-    if (_liteEngine == null) throw Exception('No LiteRT-LM model loaded');
-
-    await _subscription?.cancel();
-    await _ensureLiteRtConversation(
-      prompt: prompt,
-      conversationHistory: conversationHistory,
-      systemPrompt: systemPrompt,
-      temperature: temperature,
-    );
-
-    final completer = Completer<String>();
-    final buffer = StringBuffer();
-    bool completed = false;
-    bool hasVisibleOutput = false;
-    var tokenCount = 0;
-
-    void finish(String result) {
-      if (!completed && !_disposed) {
-        completed = true;
-        _idleTimer?.cancel();
-        _subscription?.cancel();
-        _onStop = null;
-        if (!completer.isCompleted) completer.complete(result);
-      }
-    }
-
-    _onStop = () => finish(buffer.toString());
-
-    if ((imagePath != null && imagePath.isNotEmpty) ||
-        (audioPath != null && audioPath.isNotEmpty)) {
-      final contents = <LiteLmContent>[
-        LiteLmContent.text(prompt),
-        if (imagePath != null && imagePath.isNotEmpty)
-          LiteLmContent.imageFile(imagePath),
-        if (audioPath != null && audioPath.isNotEmpty)
-          LiteLmContent.audioFile(audioPath),
-      ];
-
-      _subscription =
-          _liteConversation!.sendMultimodalMessageStream(contents).listen(
-        (delta) {
-          var text = _cleanLiteRtChunk(delta.text);
-          if (text.isEmpty) return;
-
-          if (!hasVisibleOutput) {
-            if (!_hasPrintableText(text)) return;
-            text = text.trimLeft();
-            hasVisibleOutput = true;
-          }
-
-          if (tokenCount == 0) {
-            print('[Inference] LiteRT-LM multimodal FIRST TOKEN received');
-          }
-          _liteConversationHasMessages = true;
-          tokenCount++;
-          buffer.write(text);
-          onToken?.call(text);
-          _idleTimer?.cancel();
-          _idleTimer = Timer(const Duration(seconds: 8), () {
-            print(
-                '[Inference] LiteRT-LM multimodal idle timeout - $tokenCount chunks');
-            finish(buffer.toString());
-          });
-        },
-        onDone: () {
-          _liteConversationHasMessages = true;
-          print(
-              '[Inference] LiteRT-LM multimodal stream done - $tokenCount chunks');
-          finish(buffer.toString());
-        },
-        onError: (error) {
-          print('[Inference] LiteRT-LM multimodal stream error: $error');
-          finish('ERROR: LiteRT-LM multimodal generation failed - $error');
-        },
-      );
-
-      _idleTimer = Timer(const Duration(seconds: 90), () {
-        if (tokenCount == 0) {
-          finish('ERROR: LiteRT-LM multimodal model did not respond.');
-        }
-      });
-
-      Future.delayed(const Duration(seconds: 240), () {
-        if (!completed) {
-          final partial = buffer.toString();
-          finish(partial.isEmpty
-              ? 'ERROR: LiteRT-LM multimodal generation timed out.'
-              : partial);
-        }
-      });
-
-      return completer.future;
-    }
-
-    _subscription = _liteConversation!.sendMessageStream(prompt).listen(
-      (delta) {
-        var text = _cleanLiteRtChunk(delta.text);
-        if (text.isEmpty) return;
-
-        if (!hasVisibleOutput) {
-          if (!_hasPrintableText(text)) return;
-          text = text.trimLeft();
-          hasVisibleOutput = true;
-        }
-
-        if (tokenCount == 0) {
-          print('[Inference] LiteRT-LM FIRST TOKEN received');
-        }
-        _liteConversationHasMessages = true;
-        tokenCount++;
-        buffer.write(text);
-        onToken?.call(text);
-        _idleTimer?.cancel();
-        _idleTimer = Timer(const Duration(seconds: 5), () {
-          print('[Inference] LiteRT-LM idle timeout - $tokenCount chunks');
-          finish(buffer.toString());
-        });
-      },
-      onDone: () {
-        _liteConversationHasMessages = true;
-        print('[Inference] LiteRT-LM stream done - $tokenCount chunks');
-        finish(buffer.toString());
-      },
-      onError: (error) {
-        print('[Inference] LiteRT-LM stream error: $error');
-        finish('ERROR: LiteRT-LM generation failed - $error');
-      },
-    );
-
-    _idleTimer = Timer(const Duration(seconds: 60), () {
-      if (tokenCount == 0) {
-        finish('ERROR: LiteRT-LM model did not respond. Try a smaller model.');
-      }
-    });
-
-    Future.delayed(const Duration(seconds: 180), () {
-      if (!completed) {
-        final partial = buffer.toString();
-        finish(partial.isEmpty
-            ? 'ERROR: LiteRT-LM generation timed out.'
-            : partial);
-      }
-    });
-
-    return completer.future;
-  }
-
-  Future<void> _ensureLiteRtConversation({
-    required String prompt,
-    required List<Map<String, String>>? conversationHistory,
-    required String systemPrompt,
-    required double temperature,
-  }) async {
-    final hasIncomingHistory = conversationHistory != null &&
-        conversationHistory.any((msg) => (msg['content'] ?? '').isNotEmpty);
-    final shouldReset = _liteConversation == null ||
-        _liteConversationSystemPrompt != systemPrompt ||
-        _liteConversationTemperature != temperature ||
-        (_liteConversationHasMessages && !hasIncomingHistory);
-
-    if (!shouldReset) return;
-
-    try {
-      await _liteConversation?.dispose();
-    } catch (_) {}
-
-    _liteConversation = await _liteEngine!.createConversation(
-      LiteLmConversationConfig(
-        systemInstruction: systemPrompt,
-        initialMessages:
-            _buildLiteRtInitialMessages(prompt, conversationHistory),
-        samplerConfig: LiteLmSamplerConfig(
-          temperature: temperature,
-          topK: 64,
-          topP: 0.95,
-        ),
-      ),
-    );
-    _liteConversationSystemPrompt = systemPrompt;
-    _liteConversationTemperature = temperature;
-    _liteConversationHasMessages = hasIncomingHistory;
   }
 
   Future<void> stop() async {
@@ -625,10 +318,6 @@ class InferenceEngine {
     _onStop = null;
     stopCallback?.call();
     unawaited(_subscription?.cancel() ?? Future<void>.value());
-    if (_isLiteRt) {
-      _liteConversationHasMessages = true;
-      return;
-    }
     try {
       await _controller?.stop().timeout(const Duration(milliseconds: 800));
     } catch (_) {}
@@ -637,21 +326,11 @@ class InferenceEngine {
   /// Reset any persistent conversation state so the next generation
   /// starts with a clean context. Essential when switching chat sessions.
   Future<void> resetConversation() async {
-    if (_isLiteRt) {
-      try {
-        await _liteConversation?.dispose();
-      } catch (_) {}
-      _liteConversation = null;
-      _liteConversationSystemPrompt = null;
-      _liteConversationTemperature = null;
-      _liteConversationHasMessages = false;
-    }
     // llama.cpp (GGUF) is stateless per-generation — no native
     // conversation object to reset.
   }
 
   Future<ContextInfo?> getContextInfo() async {
-    if (_isLiteRt) return null;
     try {
       return await _controller?.getContextInfo();
     } catch (_) {
@@ -668,22 +347,10 @@ class InferenceEngine {
         await _controller?.dispose();
       } catch (_) {}
     }
-    try {
-      await _liteConversation?.dispose();
-    } catch (_) {}
-    try {
-      await _liteEngine?.dispose();
-    } catch (_) {}
     unawaited(_loadProgressSub?.cancel() ?? Future<void>.value());
     _loadProgressSub = null;
     _controller = null;
-    _liteConversation = null;
-    _liteEngine = null;
-    _isLiteRt = false;
     _hasLoadedModel = false;
-    _liteConversationSystemPrompt = null;
-    _liteConversationTemperature = null;
-    _liteConversationHasMessages = false;
   }
 
   // ── Helpers ──
@@ -691,53 +358,6 @@ class InferenceEngine {
   int _extractGpuModel(String gpuName) {
     final match = RegExp(r'(\d{3})').firstMatch(gpuName.toLowerCase());
     return match != null ? (int.tryParse(match.group(1)!) ?? 0) : 0;
-  }
-
-  String _runtimeFor(String modelPath, String? modelRuntime) {
-    final runtime = modelRuntime?.toLowerCase();
-    if (runtime == 'litert' || runtime == 'llama') return runtime!;
-    final lower = modelPath.toLowerCase();
-    if (lower.endsWith('.litertlm')) return 'litert';
-    return 'llama';
-  }
-
-  List<LiteLmMessage> _buildLiteRtInitialMessages(
-    String prompt,
-    List<Map<String, String>>? history,
-  ) {
-    if (history == null || history.isEmpty) return const [];
-
-    var recent = history.length > 16
-        ? history.sublist(history.length - 16)
-        : List<Map<String, String>>.from(history);
-    if (recent.isNotEmpty &&
-        recent.last['role'] == 'user' &&
-        recent.last['content'] == prompt) {
-      recent = recent.sublist(0, recent.length - 1);
-    }
-
-    return recent
-        .where((msg) => (msg['content'] ?? '').trim().isNotEmpty)
-        .map((msg) {
-      final content = msg['content'] ?? '';
-      return msg['role'] == 'assistant'
-          ? LiteLmMessage.model(content)
-          : LiteLmMessage.user(content);
-    }).toList();
-  }
-
-  String _cleanLiteRtChunk(String text) {
-    return _sanitizeGemmaGarbage(
-      text
-          .replaceAll(
-              RegExp(r'[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]'),
-              '')
-          .replaceAll(RegExp(r'[\u200B-\u200D\uFEFF]'), '')
-          .replaceAll('\uFFFD', '')
-          .replaceAll('<|endoftext|>', '')
-          .replaceAll('<|im_end|>', '')
-          .replaceAll('<|end|>', ''),
-    );
   }
 
   /// Strip Gemma garbage tokens that leak when Q4_K_M dequant is corrupt
@@ -755,48 +375,34 @@ class InferenceEngine {
         .replaceAll('</s>', '');
   }
 
-  bool _hasPrintableText(String text) {
-    for (final rune in text.runes) {
-      if (rune > 32 &&
-          rune != 0x7F &&
-          rune != 0x200B &&
-          rune != 0x200C &&
-          rune != 0x200D &&
-          rune != 0xFEFF &&
-          rune != 0xFFFD) {
-        return true;
-      }
-    }
-    return false;
-  }
-
   List<ChatMessage> _buildChatMessages(
     String prompt,
     List<Map<String, String>>? history,
     String systemPrompt, {
     String? imagePath,
+    bool qwen3Model = false,
   }) {
+    final window = buildLocalPromptWindow(
+      prompt: prompt,
+      history: history,
+      systemPrompt: systemPrompt,
+      contextSize: math.max(64, _contextSize - _outputTokenLimit),
+      qwen3Model: qwen3Model,
+    );
     final messages = <ChatMessage>[];
-    messages.add(ChatMessage(role: 'system', content: systemPrompt));
-
-    if (history != null && history.isNotEmpty) {
-      var recent = history.length > 16
-          ? history.sublist(history.length - 16)
-          : List.of(history);
-      if (recent.isNotEmpty &&
-          recent.last['role'] == 'user' &&
-          recent.last['content'] == prompt) {
-        recent = recent.sublist(0, recent.length - 1);
-      }
-      for (final msg in recent) {
-        final content = msg['content'] ?? '';
-        messages
-            .add(ChatMessage(role: msg['role'] ?? 'user', content: content));
-      }
+    messages.add(ChatMessage(role: 'system', content: window.systemPrompt));
+    for (final message in window.history) {
+      messages.add(ChatMessage(
+        role: message['role'] ?? 'user',
+        content: message['content'] ?? '',
+      ));
     }
 
-    messages
-        .add(ChatMessage(role: 'user', content: prompt, imagePath: imagePath));
+    messages.add(ChatMessage(
+      role: 'user',
+      content: window.userPrompt,
+      imagePath: imagePath,
+    ));
     return messages;
   }
 
@@ -806,15 +412,27 @@ class InferenceEngine {
     String systemPrompt,
     String modelName,
   ) {
-    // Auto-detect template from model name
     final name = modelName.toLowerCase();
+    final bounded = _buildChatMessages(
+      userMessage,
+      history,
+      systemPrompt,
+      qwen3Model: name.contains('qwen3'),
+    );
+    final system = bounded.first.content;
+    final message = bounded.last.content;
+    final boundedHistory = bounded
+        .skip(1)
+        .take(bounded.length - 2)
+        .map((item) => {'role': item.role, 'content': item.content})
+        .toList();
     if (name.contains('gemma')) {
-      return _buildGemma(userMessage, history, systemPrompt);
+      return _buildGemma(message, boundedHistory, system);
     }
     if (name.contains('llama-3') || name.contains('llama3')) {
-      return _buildLlama3(userMessage, history, systemPrompt);
+      return _buildLlama3(message, boundedHistory, system);
     }
-    return _buildChatML(userMessage, history, systemPrompt);
+    return _buildChatML(message, boundedHistory, system);
   }
 
   String _buildChatML(
@@ -822,13 +440,10 @@ class InferenceEngine {
     final buf = StringBuffer();
     buf.write('<|im_start|>system\n$sys<|im_end|>\n');
     if (history != null) {
-      final recent =
-          history.length > 8 ? history.sublist(history.length - 8) : history;
-      for (final m in recent) {
-        final content = m['content'] ?? '';
-        final trunc =
-            content.length > 300 ? '${content.substring(0, 300)}...' : content;
-        buf.write('<|im_start|>${m['role'] ?? 'user'}\n$trunc<|im_end|>\n');
+      for (final message in history) {
+        buf.write(
+          '<|im_start|>${message['role'] ?? 'user'}\n${message['content'] ?? ''}<|im_end|>\n',
+        );
       }
     }
     buf.write('<|im_start|>user\n$msg<|im_end|>\n<|im_start|>assistant\n');

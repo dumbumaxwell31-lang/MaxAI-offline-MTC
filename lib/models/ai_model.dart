@@ -1,7 +1,5 @@
 class AiModel {
   static const runtimeLlama = 'llama';
-  static const runtimeLiteRt = 'litert';
-  static const runtimeSd = 'sd';
 
   static bool hasVisionMarker(String value) {
     final lower = value.toLowerCase();
@@ -62,11 +60,6 @@ class AiModel {
       };
 
   static String runtimeFromFilename(String filename, {String? template}) {
-    final lower = filename.toLowerCase();
-    if (lower.endsWith('.litertlm')) return runtimeLiteRt;
-    if (lower.endsWith('.safetensors') || template == runtimeSd) {
-      return runtimeSd;
-    }
     return runtimeLlama;
   }
 

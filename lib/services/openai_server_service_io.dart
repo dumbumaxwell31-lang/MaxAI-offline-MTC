@@ -138,19 +138,17 @@ class OpenAiServerService {
   Future<void> _handleCapabilities(HttpRequest request) async {
     final inference = Get.find<InferenceService>();
     final hasModel = inference.isModelLoaded.value;
-    final isLiteRt = hasModel && inference.loadedModelRuntime.value == 'litert';
     await _json(request, {
       'server': 'AI Chat Local OpenAI API',
       'running': true,
       'model': hasModel ? inference.loadedModelName.value : null,
       'runtime': inference.loadedModelRuntime.value,
-      'requires_litert': false,
       'capabilities': {
         'text': hasModel,
-        'image': isLiteRt && inference.isVisionLoaded.value,
-        'audio': isLiteRt,
+        'image': false,
+        'audio': false,
         'streaming': hasModel,
-        'gguf': hasModel && !isLiteRt,
+        'gguf': hasModel,
       },
     });
   }
@@ -258,7 +256,7 @@ class OpenAiServerService {
 
   String? _localModelError(InferenceService inference) {
     if (!inference.isModelLoaded.value) {
-      return 'No local model loaded. Load a GGUF or LiteRT-LM model first.';
+      return 'No local GGUF model loaded.';
     }
     return null;
   }
@@ -279,22 +277,25 @@ class OpenAiServerService {
 
     for (var i = 0; i < rawMessages.length; i++) {
       final raw = rawMessages[i];
-      if (raw is! Map)
+      if (raw is! Map) {
         return _ParsedChatRequest.error('message[$i] must be an object');
+      }
       final role = '${raw['role'] ?? ''}';
       if (role != 'system' && role != 'user' && role != 'assistant') {
         return _ParsedChatRequest.error('message[$i].role is unsupported');
       }
       final contentResult = await _parseContent(raw['content']);
-      if (contentResult.error != null)
+      if (contentResult.error != null) {
         return _ParsedChatRequest.error(contentResult.error!);
+      }
       tempFiles.addAll(contentResult.tempFiles);
       imagePath ??= contentResult.imagePath;
       audioPath ??= contentResult.audioPath;
 
       if (role == 'system') {
-        if (contentResult.text.trim().isNotEmpty)
+        if (contentResult.text.trim().isNotEmpty) {
           systemParts.add(contentResult.text.trim());
+        }
         continue;
       }
       if (i == rawMessages.length - 1 && role == 'user') {
@@ -321,9 +322,10 @@ class OpenAiServerService {
 
   Future<_ContentResult> _parseContent(dynamic content) async {
     if (content is String) return _ContentResult(text: content);
-    if (content is! List)
+    if (content is! List) {
       return _ContentResult.error(
           'message.content must be a string or content array');
+    }
 
     final text = StringBuffer();
     String? imagePath;
@@ -331,15 +333,17 @@ class OpenAiServerService {
     final tempFiles = <File>[];
 
     for (final part in content) {
-      if (part is! Map)
+      if (part is! Map) {
         return _ContentResult.error('content part must be an object');
+      }
       final type = '${part['type'] ?? ''}';
       if (type == 'text') {
         text.write('${part['text'] ?? ''}');
       } else if (type == 'image_url') {
-        if (imagePath != null)
+        if (imagePath != null) {
           return _ContentResult.error(
               'only one image is supported per request');
+        }
         final imageUrl = part['image_url'];
         final url = imageUrl is Map ? '${imageUrl['url'] ?? ''}' : '';
         final file = await _dataUrlToTempFile(url, 'image');
@@ -347,9 +351,10 @@ class OpenAiServerService {
         imagePath = file.path;
         tempFiles.add(file.file!);
       } else if (type == 'input_audio' || type == 'audio_url') {
-        if (audioPath != null)
+        if (audioPath != null) {
           return _ContentResult.error(
               'only one audio file is supported per request');
+        }
         final raw = part[type == 'input_audio' ? 'input_audio' : 'audio_url'];
         final data = raw is Map ? '${raw['data'] ?? raw['url'] ?? ''}' : '';
         final file = await _dataUrlToTempFile(data, 'audio');
@@ -599,8 +604,7 @@ class _ParsedChatRequest {
     required this.imagePath,
     required this.audioPath,
     required this.tempFiles,
-    this.error,
-  });
+  }) : error = null;
 
   _ParsedChatRequest.error(this.error)
       : prompt = '',
@@ -631,8 +635,7 @@ class _ContentResult {
     this.imagePath,
     this.audioPath,
     this.tempFiles = const [],
-    this.error,
-  });
+  }) : error = null;
 
   _ContentResult.error(this.error)
       : text = '',

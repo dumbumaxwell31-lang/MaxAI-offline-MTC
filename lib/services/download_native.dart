@@ -4,8 +4,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:flutter/services.dart';
 
 final Dio _dio = Dio();
-final Map<String, CancelToken> _cancelTokens = {};
-const _channel = MethodChannel('com.aichat.ai_chat/model_import');
+const _channel = MethodChannel('com.maxai/model_download');
 
 Future<String> getModelsDir() async {
   final dir = await getApplicationDocumentsDirectory();
@@ -23,10 +22,7 @@ Future<List<String>> getDownloadedModels(String modelsDir) async {
   if (!await dir.exists()) return [];
   return dir
       .listSync()
-      .where((f) =>
-          f.path.endsWith('.gguf') ||
-          f.path.endsWith('.litertlm') ||
-          f.path.endsWith('.safetensors'))
+      .where((f) => f.path.toLowerCase().endsWith('.gguf'))
       .map((f) => f.path.split('/').last)
       .toList();
 }
@@ -35,6 +31,15 @@ Future<int> getModelSize(String path) async {
   final file = File(path);
   if (!await file.exists()) return 0;
   return await file.length();
+}
+
+Future<int?> getAvailableStorageBytes(String modelsDir) async {
+  if (!Platform.isAndroid) return null;
+  final value = await _channel.invokeMethod<dynamic>(
+    'getAvailableStorageBytes',
+    {'modelsDir': modelsDir},
+  );
+  return (value as num?)?.toInt();
 }
 
 Future<int> getRemoteFileSize(String url, {String? authToken}) async {
@@ -68,7 +73,7 @@ Future<int> getRemoteFileSize(String url, {String? authToken}) async {
         followRedirects: true,
       ),
     );
-    
+
     // Check Content-Range header first (e.g., bytes 0-0/12345678)
     final contentRange = response.headers.value('content-range');
     if (contentRange != null) {
@@ -90,82 +95,6 @@ Future<int> getRemoteFileSize(String url, {String? authToken}) async {
   return 0;
 }
 
-Future<String> downloadModel({
-  required String url,
-  required String savePath,
-  String? authToken,
-  void Function(int received, int total)? onProgress,
-}) async {
-  final tempPath = '$savePath.part';
-  final cancelToken = CancelToken();
-  final filename = savePath.split('/').last;
-  _cancelTokens[filename] = cancelToken;
-  var expectedTotalBytes = 0;
-
-  try {
-    final tempFile = File(tempPath);
-    final oldTempFile = File('$savePath.tmp');
-    if (await oldTempFile.exists()) {
-      await oldTempFile.delete();
-    }
-    if (await tempFile.exists()) {
-      await tempFile.delete();
-    }
-
-    final headers = <String, dynamic>{};
-    if (authToken != null && authToken.isNotEmpty) {
-      headers['Authorization'] = 'Bearer $authToken';
-    }
-
-    await _dio.download(
-      url,
-      tempPath,
-      cancelToken: cancelToken,
-      deleteOnError: false,
-      options: Options(
-        headers: headers,
-        responseType: ResponseType.stream,
-        followRedirects: true,
-      ),
-      onReceiveProgress: (received, total) {
-        if (total > 0) {
-          expectedTotalBytes = total;
-        }
-        onProgress?.call(received, total > 0 ? total : 0);
-      },
-    );
-
-    final downloadedBytes = await tempFile.length();
-    if (expectedTotalBytes > 0 && downloadedBytes < expectedTotalBytes) {
-      await tempFile.delete();
-      throw Exception(
-        'Downloaded file is incomplete: $downloadedBytes of $expectedTotalBytes bytes.',
-      );
-    }
-    final finalFile = File(savePath);
-    if (await finalFile.exists()) {
-      await finalFile.delete();
-    }
-    await tempFile.rename(savePath);
-    _cancelTokens.remove(filename);
-    return savePath;
-  } on DioException catch (e) {
-    if (e.type == DioExceptionType.cancel) {
-      _cancelTokens.remove(filename);
-      return 'PAUSED';
-    }
-    _cancelTokens.remove(filename);
-    throw Exception('Download failed: ${e.message}');
-  } catch (e) {
-    _cancelTokens.remove(filename);
-    rethrow;
-  }
-}
-
-void pauseDownload(String filename) {
-  _cancelTokens[filename]?.cancel('paused');
-}
-
 Future<void> deleteModel(String path) async {
   final file = File(path);
   if (await file.exists()) await file.delete();
@@ -181,6 +110,7 @@ Future<Map<String, dynamic>?> startNativeDownload({
   required String url,
   required String filename,
   required String modelsDir,
+  required int expectedBytes,
 }) async {
   if (!Platform.isAndroid) return null;
   try {
@@ -190,6 +120,7 @@ Future<Map<String, dynamic>?> startNativeDownload({
         'url': url,
         'filename': filename,
         'modelsDir': modelsDir,
+        'expectedBytes': expectedBytes,
       },
     );
     return result;
@@ -222,9 +153,12 @@ Future<bool> cancelNativeDownload({
 Future<List<Map<String, dynamic>>> getActiveNativeDownloads() async {
   if (!Platform.isAndroid) return [];
   try {
-    final List<dynamic>? result = await _channel.invokeListMethod<dynamic>('getActiveDownloads');
+    final List<dynamic>? result =
+        await _channel.invokeListMethod<dynamic>('getActiveDownloads');
     if (result == null) return [];
-    return result.map((item) => Map<String, dynamic>.from(item as Map)).toList();
+    return result
+        .map((item) => Map<String, dynamic>.from(item as Map))
+        .toList();
   } catch (e) {
     print('[DownloadNative] getActiveNativeDownloads failed: $e');
     return [];
