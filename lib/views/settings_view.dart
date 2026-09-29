@@ -5,6 +5,7 @@ import 'package:google_fonts/google_fonts.dart';
 import '../controllers/settings_controller.dart';
 import '../core/colors.dart';
 import '../core/constants.dart';
+import '../core/routes.dart';
 import '../services/inference_service.dart';
 import '../services/device_info_service.dart';
 import '../services/device_info_native.dart' as platform_info;
@@ -58,6 +59,29 @@ class SettingsView extends GetView<SettingsController> {
               const SizedBox(height: 24),
               _sectionLabel(context, 'DEVICE'),
               _buildDeviceCard(context, isDark),
+              const SizedBox(height: 24),
+              _sectionLabel(context, 'LOCAL MODELS'),
+              Obx(() {
+                final activeModel =
+                    Get.find<ModelSelectionService>().selectedModel.value;
+                return _appleGroupedCard(context, isDark, children: [
+                  _appleListTile(
+                    context,
+                    isDark,
+                    leading: _iconBox(
+                      AppColors.primary,
+                      Icons.smart_toy_outlined,
+                    ),
+                    title: 'Manage local models',
+                    subtitle: activeModel == null
+                        ? 'Choose, download, and load an on-device model'
+                        : 'Active choice: ${activeModel.name}',
+                    trailing: const Icon(Icons.chevron_right_rounded),
+                    showDivider: false,
+                    onTap: () => Get.toNamed(AppRoutes.models),
+                  ),
+                ]);
+              }),
               const SizedBox(height: 24),
               _sectionLabel(context, 'INFERENCE MODE'),
               _appleGroupedCard(context, isDark, children: [
@@ -209,15 +233,15 @@ class SettingsView extends GetView<SettingsController> {
             _aboutLabelValue(
               context,
               'Project Mentor',
-              'Mikael Dhihwa, CEO of Midlands School of Robotics and Computing '
+              'Michael Dhihwa, CEO of Midlands School of Robotics and Computing '
                   'and Computer Science Lecturer at Mkoba Teachers College.',
             ),
             Divider(height: 24, color: dividerColor),
             _aboutSectionTitle(context, 'Contact Us'),
             _aboutContactRow(context, 'Name', 'Maxwell Dumbu'),
             _aboutContactRow(context, 'Institution', 'Mkoba Teachers College'),
-            _aboutContactRow(context, 'Mobile', '+263 781 485 580'),
-            _aboutContactRow(context, 'WhatsApp', '+263 782 485 580'),
+            _aboutContactRow(context, 'Calls', '+263 781 485 580'),
+            _aboutContactRow(context, 'WhatsApp', '+263 781 485 580'),
             _aboutContactRow(context, 'Email', 'dumbumaxwell31@gmail.com'),
           ],
         ),

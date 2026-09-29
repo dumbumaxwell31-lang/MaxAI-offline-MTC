@@ -6,7 +6,6 @@ import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'controllers/settings_controller.dart';
-import 'controllers/cloud_model_controller.dart';
 import 'controllers/model_controller.dart';
 import 'core/theme.dart';
 import 'core/app_identity.dart';
@@ -69,7 +68,6 @@ void main() {
 
     // Settings controller must be initialized before runApp for theme support
     final settingsController = Get.put(SettingsController());
-    Get.put(CloudModelController());
 
     Get.put(InferenceService());
     Get.put(CloudService());
@@ -165,8 +163,7 @@ void _autoConfigureForDevice() {
       ) ??
       false;
   if (hasConfigured) {
-    final isPro =
-        selected?.identifier == AutomaticModelPolicy.maxAiPro.identifier;
+    final isPro = selected?.requiresProHardware ?? false;
     final legacyContextSize = isPro ? 2048 : 1024;
     final legacyMaxTokens = isPro ? 512 : 256;
     final savedContextSize = hive.getSetting<int>(AppConstants.keyContextSize);
@@ -201,7 +198,7 @@ void _autoConfigureForDevice() {
     return;
   }
 
-  final model = selected ?? AutomaticModelPolicy.maxAiLite;
+  final model = selected ?? AutomaticModelPolicy.maxliteModel1;
   final limits = InferenceResourcePolicy.forAvailableRam(
     availableRamGb: device.hasAvailableRamMeasurement.value
         ? device.availableRamGB.value

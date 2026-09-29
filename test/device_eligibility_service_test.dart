@@ -2,8 +2,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:maxai/services/device_eligibility_service.dart';
 
 void main() {
-  const minimumStorage = DeviceEligibilityService.minimumFreeStorageBytes;
-
   DeviceEligibilityService service({
     required Future<double?> Function() totalRam,
     required Future<int?> Function() freeStorage,
@@ -14,87 +12,85 @@ void main() {
     );
   }
 
-  test('rejects a device with less than 2 GB total RAM', () async {
+  test('does not impose a device-wide RAM or storage minimum on Lite',
+      () async {
     var checkedStorage = false;
     final eligibility = service(
-      totalRam: () async => 1.99,
+      totalRam: () async => 1.5,
       freeStorage: () async {
         checkedStorage = true;
-        return minimumStorage;
+        return 0;
       },
     );
 
     final result = await eligibility.refreshEligibility();
 
-    expect(result.status, DeviceEligibilityStatus.insufficientRam);
+    expect(result.isEligible, isTrue);
+    expect(result.totalRamGb, 1.5);
     expect(checkedStorage, isFalse);
   });
 
-  test('accepts exactly 2 GB total RAM with sufficient storage', () async {
+  test('requires 4 GB physical RAM for Pro and rejects below threshold',
+      () async {
     final eligibility = service(
-      totalRam: () async => 2.0,
-      freeStorage: () async => minimumStorage,
-    );
-
-    final result = await eligibility.refreshEligibility();
-
-    expect(result.isEligible, isTrue);
-  });
-
-  test('accepts more than 2 GB total RAM with sufficient storage', () async {
-    final eligibility = service(
-      totalRam: () async => 8.0,
-      freeStorage: () async => minimumStorage + 1,
-    );
-
-    final result = await eligibility.refreshEligibility();
-
-    expect(result.isEligible, isTrue);
-  });
-
-  test('rejects less than 2 GB of free persistent storage', () async {
-    final eligibility = service(
-      totalRam: () async => 4.0,
-      freeStorage: () async => minimumStorage - 1,
-    );
-
-    final result = await eligibility.refreshEligibility();
-
-    expect(result.status, DeviceEligibilityStatus.insufficientStorage);
-  });
-
-  test('accepts exactly 2 GB of free persistent storage', () async {
-    final eligibility = service(
-      totalRam: () async => 4.0,
-      freeStorage: () async => minimumStorage,
-    );
-
-    final result = await eligibility.refreshEligibility();
-
-    expect(result.status, DeviceEligibilityStatus.eligible);
-  });
-
-  test('handles unknown total RAM safely', () async {
-    final eligibility = service(
-      totalRam: () async => null,
-      freeStorage: () async => minimumStorage,
-    );
-
-    final result = await eligibility.refreshEligibility();
-
-    expect(result.status, DeviceEligibilityStatus.unavailable);
-    expect(result.canRetry, isTrue);
-  });
-
-  test('handles unknown persistent storage safely', () async {
-    final eligibility = service(
-      totalRam: () async => 4.0,
+      totalRam: () async => 3.99,
       freeStorage: () async => null,
     );
 
-    final result = await eligibility.refreshEligibility();
+    final result = await eligibility.refreshEligibility(requiredRamGb: 4);
+
+    expect(result.status, DeviceEligibilityStatus.insufficientRam);
+    expect(result.message, contains('4GB'));
+  });
+
+  test('allows Pro at exactly 4 GB physical RAM', () async {
+    final eligibility = service(
+      totalRam: () async => 4,
+      freeStorage: () async => null,
+    );
+
+    final result = await eligibility.refreshEligibility(requiredRamGb: 4);
+
+    expect(result.isEligible, isTrue);
+    expect(result.totalRamGb, 4);
+  });
+
+  test('locks Pro if physical RAM cannot be verified', () async {
+    final eligibility = service(
+      totalRam: () async => null,
+      freeStorage: () async => null,
+    );
+
+    final result = await eligibility.refreshEligibility(requiredRamGb: 4);
 
     expect(result.status, DeviceEligibilityStatus.unavailable);
     expect(result.canRetry, isTrue);
+  });
+
+  test('requires the full per-download storage amount', () async {
+    const requiredStorage = 3 * 1024 * 1024 * 1024;
+    final lowStorage = service(
+      totalRam: () async => null,
+      freeStorage: () async => requiredStorage - 1,
+    );
+    final enoughStorage = service(
+      totalRam: () async => null,
+      freeStorage: () async => requiredStorage,
+    );
+
+    expect(
+      (await lowStorage.refreshEligibility(
+        requiredStorageBytes: requiredStorage,
+      ))
+          .status,
+      DeviceEligibilityStatus.insufficientStorage,
+    );
+    expect(
+      (await enoughStorage.refreshEligibility(
+        requiredStorageBytes: requiredStorage,
+      ))
+          .isEligible,
+      isTrue,
+    );
   });
 }

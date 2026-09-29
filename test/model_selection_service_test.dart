@@ -1,213 +1,179 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:get/get.dart';
-import 'package:maxai/services/device_eligibility_service.dart';
 import 'package:maxai/services/model_selection_service.dart';
 
 void main() {
-  group('AutomaticModelPolicy', () {
-    test('selects Maxlite AI Model below 6 GB total RAM', () {
-      final selected = AutomaticModelPolicy.selectForHardware(
-        totalRamGb: 5.99,
-        availableRamGb: 2.0,
-        freeStorageBytes: AutomaticModelPolicy.requiredDownloadStorageBytes(
-          AutomaticModelPolicy.maxAiLite,
-        ),
-      );
-
-      expect(selected?.name, 'Maxlite AI Model');
-      expect(selected?.identifier, 'qwen3-0.6b-q4_k_m');
-      expect(selected?.quantization, 'Q4_K_M');
-      expect(selected?.expectedFileSizeBytes, 484220320);
-    });
-
-    test('uses branded names while retaining technical model configuration',
-        () {
-      expect(AutomaticModelPolicy.maxAiLite.name, 'Maxlite AI Model');
-      expect(AutomaticModelPolicy.maxAiLite.filename,
-          'Qwen_Qwen3-0.6B-Q4_K_M.gguf');
-      expect(AutomaticModelPolicy.maxAiLite.identifier, 'qwen3-0.6b-q4_k_m');
+  group('AutomaticModelPolicy catalog', () {
+    test('contains exactly the four branded model choices', () {
       expect(
-        AutomaticModelPolicy.maxAiLite.downloadUrl,
-        'https://huggingface.co/bartowski/Qwen_Qwen3-0.6B-GGUF/resolve/7bcae0bc7b0606f1e948f8cdb31b98a2c10635db/Qwen_Qwen3-0.6B-Q4_K_M.gguf',
-      );
-
-      expect(AutomaticModelPolicy.maxAiPro.name, 'MaxPro AI Model');
-      expect(AutomaticModelPolicy.maxAiPro.filename, 'Qwen3-4B-Q4_K_M.gguf');
-      expect(AutomaticModelPolicy.maxAiPro.identifier, 'qwen3-4b-q4_k_m');
-      expect(
-        AutomaticModelPolicy.maxAiPro.downloadUrl,
-        'https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/a9a60d009fa7ff9606305047c2bf77ac25dbec49/Qwen3-4B-Q4_K_M.gguf',
+        AutomaticModelPolicy.supportedModels.map((model) => model.name),
+        [
+          'Maxlite Model 1',
+          'Maxlite Model 2',
+          'MaxPro Model 1',
+          'MaxPro Model 2',
+        ],
       );
     });
 
-    test('maps internal filenames to user-facing model names', () {
+    test('maps all four names to the requested quantized GGUF artifacts', () {
+      expect(AutomaticModelPolicy.maxliteModel1.filename,
+          'SmolLM2-1.7B-Instruct-Q4_K_M.gguf');
+      expect(AutomaticModelPolicy.maxliteModel2.filename,
+          'google_gemma-3-1b-it-Q4_K_M.gguf');
+      expect(AutomaticModelPolicy.maxproModel1.filename,
+          'microsoft_Phi-4-mini-instruct-Q4_K_M.gguf');
+      expect(
+          AutomaticModelPolicy.maxproModel2.filename, 'Qwen3-4B-Q4_K_M.gguf');
+      for (final model in AutomaticModelPolicy.supportedModels) {
+        expect(model.quantization, 'Q4_K_M');
+        expect(model.downloadUrl, startsWith('https://huggingface.co/'));
+        expect(model.expectedFileSizeBytes, greaterThan(700 * 1024 * 1024));
+        expect(model.sha256, hasLength(64));
+      }
+    });
+
+    test('keeps the verified public source URLs and exact sizes', () {
+      expect(
+        [
+          AutomaticModelPolicy.maxliteModel1.downloadUrl,
+          AutomaticModelPolicy.maxliteModel2.downloadUrl,
+          AutomaticModelPolicy.maxproModel1.downloadUrl,
+          AutomaticModelPolicy.maxproModel2.downloadUrl,
+        ],
+        [
+          'https://huggingface.co/bartowski/SmolLM2-1.7B-Instruct-GGUF/resolve/3084dd417b5e2567e786340037cd3b512068fad0/SmolLM2-1.7B-Instruct-Q4_K_M.gguf',
+          'https://huggingface.co/bartowski/google_gemma-3-1b-it-GGUF/resolve/116f76234503685a98f572982177b11d44ec8ff1/google_gemma-3-1b-it-Q4_K_M.gguf',
+          'https://huggingface.co/bartowski/microsoft_Phi-4-mini-instruct-GGUF/resolve/faffc28d86d0c0781b4ec92d30e400a6d350a53b/microsoft_Phi-4-mini-instruct-Q4_K_M.gguf',
+          'https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/a9a60d009fa7ff9606305047c2bf77ac25dbec49/Qwen3-4B-Q4_K_M.gguf',
+        ],
+      );
+      expect(
+        AutomaticModelPolicy.supportedModels
+            .map((model) => model.expectedFileSizeBytes),
+        [1055609824, 806058496, 2491874688, 2497280256],
+      );
+    });
+
+    test('pins known artifact checksums and required license summaries', () {
+      expect(AutomaticModelPolicy.maxliteModel1.sha256,
+          '77665ea4815999596525c636fbeb56ba8b080b46ae85efef4f0d986a139834d7');
+      expect(AutomaticModelPolicy.maxliteModel1.licenseSummary, 'Apache-2.0');
+      expect(AutomaticModelPolicy.maxliteModel2.licenseSummary,
+          'Google Gemma Terms');
+      expect(AutomaticModelPolicy.maxproModel1.licenseSummary, 'MIT');
+      expect(AutomaticModelPolicy.maxproModel2.licenseSummary, 'Apache-2.0');
+    });
+
+    test('only MaxPro entries require 4 GB total physical RAM', () {
+      expect(
+        AutomaticModelPolicy.supportedModels
+            .where((model) => model.requiresProHardware)
+            .map((model) => model.name),
+        ['MaxPro Model 1', 'MaxPro Model 2'],
+      );
+      expect(AutomaticModelPolicy.proMinimumTotalRamGb, 4.0);
+    });
+
+    test('maps internal filenames to user-facing names', () {
       expect(
         AutomaticModelPolicy.displayNameForFilename(
-          AutomaticModelPolicy.maxAiLite.filename,
+          AutomaticModelPolicy.maxliteModel1.filename,
+        ),
+        'Maxlite Model 1',
+      );
+      expect(
+        AutomaticModelPolicy.displayNameForFilename(
+          AutomaticModelPolicy.maxproModel2.filename,
+        ),
+        'MaxPro Model 2',
+      );
+      expect(
+        AutomaticModelPolicy.displayNameForFilename(
+          'Qwen_Qwen3-0.6B-Q4_K_M.gguf',
         ),
         'Maxlite AI Model',
       );
-      expect(
-        AutomaticModelPolicy.displayNameForFilename(
-          AutomaticModelPolicy.maxAiPro.filename,
-        ),
-        'MaxPro AI Model',
-      );
-    });
-
-    test(
-        'selects MaxPro AI Model at 6 GB only with sufficient free RAM and storage',
-        () {
-      final selected = AutomaticModelPolicy.selectForHardware(
-        totalRamGb: 6,
-        availableRamGb: AutomaticModelPolicy.minimumProAvailableRamGb,
-        freeStorageBytes: AutomaticModelPolicy.requiredDownloadStorageBytes(
-          AutomaticModelPolicy.maxAiPro,
-        ),
-      );
-
-      expect(selected, same(AutomaticModelPolicy.maxAiPro));
-      expect(selected?.identifier, 'qwen3-4b-q4_k_m');
-      expect(selected?.expectedFileSizeBytes, 2497280256);
-    });
-
-    test('selects MaxPro AI Model above 6 GB with resources, otherwise Maxlite',
-        () {
-      final enoughResources = AutomaticModelPolicy.selectForHardware(
-        totalRamGb: 8,
-        availableRamGb: 5,
-        freeStorageBytes: AutomaticModelPolicy.requiredDownloadStorageBytes(
-          AutomaticModelPolicy.maxAiPro,
-        ),
-      );
-      final lowFreeRam = AutomaticModelPolicy.selectForHardware(
-        totalRamGb: 8,
-        availableRamGb: 4.0,
-        freeStorageBytes: AutomaticModelPolicy.requiredDownloadStorageBytes(
-          AutomaticModelPolicy.maxAiPro,
-        ),
-      );
-      final lowStorage = AutomaticModelPolicy.selectForHardware(
-        totalRamGb: 8,
-        availableRamGb: 5,
-        freeStorageBytes: AutomaticModelPolicy.requiredDownloadStorageBytes(
-              AutomaticModelPolicy.maxAiPro,
-            ) -
-            1,
-      );
-
-      expect(enoughResources, same(AutomaticModelPolicy.maxAiPro));
-      expect(lowFreeRam, same(AutomaticModelPolicy.maxAiLite));
-      expect(lowStorage, same(AutomaticModelPolicy.maxAiLite));
-    });
-
-    test('keeps Lite eligible under memory pressure for a conservative profile',
-        () {
-      final selected = AutomaticModelPolicy.selectForHardware(
-        totalRamGb: 3.9,
-        availableRamGb: 0.4,
-        freeStorageBytes: AutomaticModelPolicy.requiredDownloadStorageBytes(
-          AutomaticModelPolicy.maxAiLite,
-        ),
-      );
-
-      expect(selected, same(AutomaticModelPolicy.maxAiLite));
-    });
-
-    test('keeps only the two supported models and no user-choice list', () {
-      final selected = AutomaticModelPolicy.selectForHardware(
-        totalRamGb: 3.9,
-        availableRamGb: 2,
-        freeStorageBytes: AutomaticModelPolicy.requiredDownloadStorageBytes(
-          AutomaticModelPolicy.maxAiLite,
-        ),
-      );
-
-      expect(selected, isA<SelectedLocalModel>());
-      expect(selected, isNot(isA<List<SelectedLocalModel>>()));
-      expect(
-        [AutomaticModelPolicy.maxAiLite, AutomaticModelPolicy.maxAiPro],
-        hasLength(2),
-      );
-    });
-
-    test('uses pinned verified Q4_K_M public GGUF artifacts', () {
-      expect(
-        AutomaticModelPolicy.maxAiLite.downloadUrl,
-        'https://huggingface.co/bartowski/Qwen_Qwen3-0.6B-GGUF/resolve/7bcae0bc7b0606f1e948f8cdb31b98a2c10635db/Qwen_Qwen3-0.6B-Q4_K_M.gguf',
-      );
-      expect(
-        AutomaticModelPolicy.maxAiLite.sha256,
-        '9acfc1e001311f34b4252001b626f2e466d592a42065f66571bff3790d4e1b14',
-      );
-      expect(
-        AutomaticModelPolicy.maxAiPro.downloadUrl,
-        'https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/a9a60d009fa7ff9606305047c2bf77ac25dbec49/Qwen3-4B-Q4_K_M.gguf',
-      );
-      expect(
-        AutomaticModelPolicy.maxAiPro.sha256,
-        '7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5',
-      );
-      expect(AutomaticModelPolicy.maxAiLite.licenseSummary, contains('Apache'));
-      expect(AutomaticModelPolicy.maxAiPro.licenseSummary, contains('Apache'));
     });
   });
 
-  test('RAM detection failure leaves local inference unavailable safely',
-      () async {
-    final service = ModelSelectionService(
-      availableRamReader: () async => throw StateError('memory unavailable'),
-      totalRamReader: () async => throw StateError('memory unavailable'),
-      availableStorageReader: () async => null,
-    );
+  group('ModelSelectionService hardware-aware choice', () {
+    test('allows both Lite choices below 4 GB physical RAM', () async {
+      final service = ModelSelectionService(
+        totalRamReader: () async => 3.5,
+        availableRamReader: () async => 0.5,
+        availableStorageReader: () async => 0,
+      );
+      await service.init();
 
-    await service.init();
+      expect(service.isModelCompatible(AutomaticModelPolicy.maxliteModel1),
+          isTrue);
+      expect(service.isModelCompatible(AutomaticModelPolicy.maxliteModel2),
+          isTrue);
+      expect(service.isModelCompatible(AutomaticModelPolicy.maxproModel1),
+          isFalse);
+      expect(service.isModelCompatible(AutomaticModelPolicy.maxproModel2),
+          isFalse);
+    });
 
-    expect(service.ramDetectionStatus.value, RamDetectionStatus.unavailable);
-    expect(service.availableRamGb.value, isNull);
-    expect(service.selectedModel.value, isNull);
-    expect(
-      service.selectionMessage.value,
-      contains('could not verify the minimum device memory'),
-    );
-  });
+    test('allows Pro at exactly 4 GB total physical RAM', () async {
+      final service = ModelSelectionService(
+        totalRamReader: () async => 4.0,
+        availableRamReader: () async => 0.4,
+        availableStorageReader: () async => 0,
+      );
+      await service.init();
 
-  test(
-      'missing storage cannot select a model, but missing free RAM selects Lite',
-      () {
-    expect(
-      AutomaticModelPolicy.selectForHardware(
-        totalRamGb: 8,
-        availableRamGb: 5,
-        freeStorageBytes: null,
-      ),
-      isNull,
-    );
-    expect(
-      AutomaticModelPolicy.selectForHardware(
-        totalRamGb: 8,
-        availableRamGb: null,
-        freeStorageBytes: 6 * 1024 * 1024 * 1024,
-      ),
-      same(AutomaticModelPolicy.maxAiLite),
-    );
-  });
+      expect(
+          service.isModelCompatible(AutomaticModelPolicy.maxproModel1), isTrue);
+      expect(
+          service.isModelCompatible(AutomaticModelPolicy.maxproModel2), isTrue);
+    });
 
-  test('eligible devices use total RAM and available storage for selection',
-      () async {
-    Get.testMode = true;
-    addTearDown(Get.reset);
-    Get.put(DeviceEligibilityService(
-      totalRamReader: () async => 8.0,
-      freeStorageReader: () async =>
-          AutomaticModelPolicy.requiredDownloadStorageBytes(
-        AutomaticModelPolicy.maxAiPro,
-      ),
-    ));
-    final service = ModelSelectionService(availableRamReader: () async => 5.0);
+    test('unknown physical RAM keeps Lite available and locks Pro', () async {
+      final service = ModelSelectionService(
+        totalRamReader: () async => throw StateError('memory unavailable'),
+        availableRamReader: () async => null,
+        availableStorageReader: () async => null,
+      );
+      await service.init();
 
-    await service.init();
+      expect(service.ramDetectionStatus.value, RamDetectionStatus.unavailable);
+      expect(service.selectedModel.value, AutomaticModelPolicy.maxliteModel1);
+      expect(service.isModelCompatible(AutomaticModelPolicy.maxliteModel1),
+          isTrue);
+      expect(service.isModelCompatible(AutomaticModelPolicy.maxproModel1),
+          isFalse);
+      expect(service.compatibilityMessage(AutomaticModelPolicy.maxproModel1),
+          contains('could not verify physical RAM'));
+    });
 
-    expect(service.selectedModel.value, AutomaticModelPolicy.maxAiPro);
+    test('reports the hardware threshold when Pro is incompatible', () async {
+      final service = ModelSelectionService(
+        totalRamReader: () async => 3.99,
+        availableRamReader: () async => 2,
+        availableStorageReader: () async => 0,
+      );
+      await service.init();
+
+      expect(
+        service.compatibilityMessage(AutomaticModelPolicy.maxproModel2),
+        'Requires at least 4GB RAM. Incompatible with this device.',
+      );
+    });
+
+    test('selects a compatible model without auto-downloading it', () async {
+      final service = ModelSelectionService(
+        totalRamReader: () async => 6,
+        availableRamReader: () async => 2,
+        availableStorageReader: () async => 0,
+      );
+      await service.init();
+
+      expect(
+        await service.selectModel(AutomaticModelPolicy.maxproModel2.identifier),
+        isTrue,
+      );
+      expect(service.selectedModel.value, AutomaticModelPolicy.maxproModel2);
+    });
   });
 }

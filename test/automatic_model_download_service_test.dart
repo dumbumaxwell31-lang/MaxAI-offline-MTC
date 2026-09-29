@@ -7,7 +7,7 @@ import 'package:maxai/services/device_eligibility_service.dart';
 import 'package:maxai/services/model_selection_service.dart';
 
 void main() {
-  const model = AutomaticModelPolicy.maxAiLite;
+  const model = AutomaticModelPolicy.maxliteModel1;
   const valid = ModelFileValidation.valid();
   const missing = ModelFileValidation.invalid('Model file is missing.');
 
@@ -17,13 +17,14 @@ void main() {
     required NetworkAvailabilityChecker network,
     required AvailableStorageReader storage,
     DeviceEligibilityChecker? eligibility,
+    SelectedLocalModel selectedModel = model,
   }) {
     return AutomaticModelDownloadService(
       validator: validator,
       downloadStarter: starter,
       networkAvailabilityChecker: network,
       availableStorageReader: storage,
-      selectedModelReader: () => model,
+      selectedModelReader: () => selectedModel,
       eligibilityChecker: eligibility,
     );
   }
@@ -41,9 +42,28 @@ void main() {
         storage: () async => 0,
       );
 
-      await downloadService.ensureSelectedModel();
+      await downloadService.downloadModel(model);
 
       expect(downloadService.state.value, AutomaticModelDownloadState.ready);
+      expect(starts, 0);
+    });
+
+    test('inspection of a missing model does not start a startup download',
+        () async {
+      var starts = 0;
+      final downloadService = service(
+        validator: (_) async => missing,
+        starter: (_) async {
+          starts++;
+          return AutomaticDownloadStartResult.started;
+        },
+        network: () async => true,
+        storage: () async => model.expectedFileSizeBytes * 3,
+      );
+
+      await downloadService.ensureSelectedModel();
+
+      expect(downloadService.state.value, AutomaticModelDownloadState.missing);
       expect(starts, 0);
     });
 
@@ -59,7 +79,7 @@ void main() {
         storage: () async => model.expectedFileSizeBytes * 3,
       );
 
-      await downloadService.ensureSelectedModel();
+      await downloadService.downloadModel(model);
 
       expect(
         downloadService.state.value,
@@ -81,7 +101,7 @@ void main() {
         storage: () async => model.expectedFileSizeBytes,
       );
 
-      await downloadService.ensureSelectedModel();
+      await downloadService.downloadModel(model);
 
       expect(
         downloadService.state.value,
@@ -90,7 +110,31 @@ void main() {
       expect(starts, 0);
     });
 
-    test('does not start a download when the device is ineligible', () async {
+    test('Lite download does not consult a Pro-only RAM gate', () async {
+      var eligibilityChecks = 0;
+      final downloadService = service(
+        validator: (_) async => missing,
+        starter: (_) async => AutomaticDownloadStartResult.started,
+        network: () async => true,
+        storage: () async => model.expectedFileSizeBytes * 3,
+        eligibility: () async {
+          eligibilityChecks++;
+          return const DeviceEligibilityResult(
+            status: DeviceEligibilityStatus.insufficientRam,
+            totalRamGb: 1.5,
+          );
+        },
+      );
+
+      await downloadService.downloadModel(model);
+
+      expect(eligibilityChecks, 0);
+      expect(
+          downloadService.state.value, AutomaticModelDownloadState.downloading);
+    });
+
+    test('Pro downloads are blocked below the RAM threshold', () async {
+      const pro = AutomaticModelPolicy.maxproModel1;
       var starts = 0;
       final downloadService = service(
         validator: (_) async => missing,
@@ -99,19 +143,19 @@ void main() {
           return AutomaticDownloadStartResult.started;
         },
         network: () async => true,
-        storage: () async => model.expectedFileSizeBytes * 3,
+        storage: () async => pro.expectedFileSizeBytes * 3,
+        selectedModel: pro,
         eligibility: () async => const DeviceEligibilityResult(
           status: DeviceEligibilityStatus.insufficientRam,
-          totalRamGb: 1.5,
+          totalRamGb: 3.9,
+          requiredRamGb: 4,
         ),
       );
 
-      await downloadService.ensureSelectedModel();
+      await downloadService.downloadModel(pro);
 
       expect(
-        downloadService.state.value,
-        AutomaticModelDownloadState.ineligible,
-      );
+          downloadService.state.value, AutomaticModelDownloadState.ineligible);
       expect(starts, 0);
     });
 
@@ -129,11 +173,11 @@ void main() {
         eligibility: () async => const DeviceEligibilityResult(
           status: DeviceEligibilityStatus.eligible,
           totalRamGb: 4,
-          freeStorageBytes: DeviceEligibilityService.minimumFreeStorageBytes,
+          freeStorageBytes: 0,
         ),
       );
 
-      await downloadService.ensureSelectedModel();
+      await downloadService.downloadModel(model);
 
       expect(
         downloadService.state.value,
@@ -151,7 +195,7 @@ void main() {
       );
       final receivedBytes = model.expectedFileSizeBytes ~/ 2;
 
-      await downloadService.ensureSelectedModel();
+      await downloadService.downloadModel(model);
       downloadService.updateProgress(
         receivedBytes: receivedBytes,
         expectedBytes: model.expectedFileSizeBytes,
@@ -178,9 +222,9 @@ void main() {
         storage: () async => model.expectedFileSizeBytes * 3,
       );
 
-      final first = downloadService.ensureSelectedModel();
+      final first = downloadService.downloadModel(model);
       await Future<void>.delayed(Duration.zero);
-      final second = downloadService.ensureSelectedModel();
+      final second = downloadService.downloadModel(model);
       await Future<void>.delayed(Duration.zero);
       completion.complete(AutomaticDownloadStartResult.started);
       await Future.wait([first, second]);
@@ -200,7 +244,7 @@ void main() {
         storage: () async => model.expectedFileSizeBytes * 3,
       );
 
-      await downloadService.ensureSelectedModel();
+      await downloadService.downloadModel(model);
 
       expect(downloadService.state.value, AutomaticModelDownloadState.failed);
       expect(downloadService.canRetry, isTrue);
@@ -222,7 +266,7 @@ void main() {
         storage: () async => model.expectedFileSizeBytes * 3,
       );
 
-      await downloadService.ensureSelectedModel();
+      await downloadService.downloadModel(model);
       online = true;
       await downloadService.retrySelectedModelDownload();
 
@@ -230,7 +274,8 @@ void main() {
       expect(downloadService.state.value, AutomaticModelDownloadState.ready);
     });
 
-    test('retry repeats the device eligibility check', () async {
+    test('retry repeats the Pro hardware eligibility check', () async {
+      const pro = AutomaticModelPolicy.maxproModel1;
       var isEligible = false;
       var eligibilityChecks = 0;
       var starts = 0;
@@ -241,7 +286,8 @@ void main() {
           return AutomaticDownloadStartResult.started;
         },
         network: () async => true,
-        storage: () async => model.expectedFileSizeBytes * 3,
+        storage: () async => pro.expectedFileSizeBytes * 3,
+        selectedModel: pro,
         eligibility: () async {
           eligibilityChecks++;
           return DeviceEligibilityResult(
@@ -249,14 +295,12 @@ void main() {
                 ? DeviceEligibilityStatus.eligible
                 : DeviceEligibilityStatus.insufficientStorage,
             totalRamGb: 4,
-            freeStorageBytes: isEligible
-                ? model.expectedFileSizeBytes * 3
-                : DeviceEligibilityService.minimumFreeStorageBytes - 1,
+            freeStorageBytes: isEligible ? pro.expectedFileSizeBytes * 3 : 0,
           );
         },
       );
 
-      await downloadService.ensureSelectedModel();
+      await downloadService.downloadModel(pro);
       isEligible = true;
       await downloadService.retrySelectedModelDownload();
 
@@ -272,7 +316,7 @@ void main() {
         storage: () async => model.expectedFileSizeBytes * 3,
       );
 
-      await downloadService.ensureSelectedModel();
+      await downloadService.downloadModel(model);
 
       expect(downloadService.state.value, AutomaticModelDownloadState.failed);
       expect(downloadService.failureMessage.value, contains('missing'));

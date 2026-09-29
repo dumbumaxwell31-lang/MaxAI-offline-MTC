@@ -30,7 +30,6 @@ class AppPages {
       binding: BindingsBuilder(() {
         Get.lazyPut(() => HomeController());
         Get.lazyPut(() => ChatController());
-        Get.lazyPut(() => TaskController());
         Get.lazyPut(() => ModelController());
         Get.lazyPut(() => SettingsController());
       }),

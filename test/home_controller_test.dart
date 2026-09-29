@@ -6,7 +6,7 @@ void main() {
     final controller = HomeController();
 
     controller.changeTab(3);
-    expect(controller.currentTab.value, 1);
+    expect(controller.currentTab.value, 2);
 
     controller.changeTab(-1);
     expect(controller.currentTab.value, 0);

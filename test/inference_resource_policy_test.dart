@@ -7,8 +7,8 @@ void main() {
     test('offers long-response Lite limits when available RAM is ample', () {
       final limits = InferenceResourcePolicy.forAvailableRam(
         availableRamGb: 3.0,
-        modelContextLimit: AutomaticModelPolicy.maxAiLite.maxContextSize,
-        modelOutputLimit: AutomaticModelPolicy.maxAiLite.maxOutputTokens,
+        modelContextLimit: AutomaticModelPolicy.maxliteModel1.maxContextSize,
+        modelOutputLimit: AutomaticModelPolicy.maxliteModel1.maxOutputTokens,
       );
 
       expect(limits.contextSize, 8192);
@@ -19,8 +19,8 @@ void main() {
     test('keeps the selected Pro model caps unchanged', () {
       final limits = InferenceResourcePolicy.forAvailableRam(
         availableRamGb: 5.0,
-        modelContextLimit: AutomaticModelPolicy.maxAiPro.maxContextSize,
-        modelOutputLimit: AutomaticModelPolicy.maxAiPro.maxOutputTokens,
+        modelContextLimit: AutomaticModelPolicy.maxproModel2.maxContextSize,
+        modelOutputLimit: AutomaticModelPolicy.maxproModel2.maxOutputTokens,
       );
 
       expect(limits.contextSize, 8192);
@@ -52,17 +52,15 @@ void main() {
       expect(limits.explanation, contains('could not be measured'));
     });
 
-    test('both automatic models have output room for 1600-word responses', () {
-      for (final model in [
-        AutomaticModelPolicy.maxAiLite,
-        AutomaticModelPolicy.maxAiPro,
-      ]) {
+    test('all model choices have output room for long responses', () {
+      for (final model in AutomaticModelPolicy.supportedModels) {
         expect(model.maxContextSize, 8192);
         expect(model.maxOutputTokens, 4096);
       }
     });
 
-    test('retries allocation failures with smaller contexts to a safe floor', () {
+    test('retries allocation failures with smaller contexts to a safe floor',
+        () {
       expect(
         InferenceResourcePolicy.contextRetrySequence(8192),
         [8192, 4096, 2048, 1024, 512],

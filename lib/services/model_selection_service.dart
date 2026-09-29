@@ -1,9 +1,11 @@
 import 'package:get/get.dart';
+
+import '../core/constants.dart';
 import '../models/ai_model.dart';
 import 'app_log_service.dart';
-import 'device_eligibility_service.dart';
 import 'device_info_service.dart';
 import 'download_service.dart';
+import 'hive_service.dart';
 
 typedef AvailableRamReader = Future<double?> Function();
 typedef TotalRamReader = Future<double?> Function();
@@ -11,7 +13,7 @@ typedef AvailableModelStorageReader = Future<int?> Function();
 
 enum RamDetectionStatus { detected, unavailable }
 
-/// Immutable metadata for one supported automatic local-model tier.
+/// Metadata for one supported GGUF option in the local model hub.
 class SelectedLocalModel {
   const SelectedLocalModel({
     required this.name,
@@ -30,6 +32,7 @@ class SelectedLocalModel {
     required this.minimumAvailableRamGb,
     required this.maxContextSize,
     required this.maxOutputTokens,
+    this.minimumTotalRamGb = 0,
   });
 
   final String name;
@@ -46,8 +49,11 @@ class SelectedLocalModel {
   final String description;
   final String sha256;
   final double minimumAvailableRamGb;
+  final double minimumTotalRamGb;
   final int maxContextSize;
   final int maxOutputTokens;
+
+  bool get requiresProHardware => minimumTotalRamGb > 0;
 
   AiModel toAiModel() => AiModel(
         name: name,
@@ -61,39 +67,76 @@ class SelectedLocalModel {
       );
 }
 
-/// Pure two-tier policy. It deliberately returns one model, never a list of
-/// choices for the user interface.
 class AutomaticModelPolicy {
   AutomaticModelPolicy._();
 
-  static const ramThresholdGb = 6.0;
-  static const minimumLiteAvailableRamGb = 0.0;
-  static const minimumProAvailableRamGb = 4.5;
+  static const proMinimumTotalRamGb = 4.0;
   static const temporaryStorageOverheadBytes = 64 * 1024 * 1024;
 
-  static const maxAiLite = SelectedLocalModel(
-    name: 'Maxlite AI Model',
-    identifier: 'qwen3-0.6b-q4_k_m',
-    filename: 'Qwen_Qwen3-0.6B-Q4_K_M.gguf',
+  static const maxliteModel1 = SelectedLocalModel(
+    name: 'Maxlite Model 1',
+    identifier: 'maxlite-smollm2-1.7b-q4_k_m',
+    filename: 'SmolLM2-1.7B-Instruct-Q4_K_M.gguf',
     quantization: 'Q4_K_M',
     downloadUrl:
-        'https://huggingface.co/bartowski/Qwen_Qwen3-0.6B-GGUF/resolve/7bcae0bc7b0606f1e948f8cdb31b98a2c10635db/Qwen_Qwen3-0.6B-Q4_K_M.gguf',
-    sourceRepository: 'bartowski/Qwen_Qwen3-0.6B-GGUF',
-    sourcePublisher: 'bartowski',
-    licenseSummary: 'Apache-2.0 (Qwen3-0.6B base model)',
-    expectedFileSizeBytes: 484220320,
-    expectedFileSizeLabel: '484 MB',
+        'https://huggingface.co/bartowski/SmolLM2-1.7B-Instruct-GGUF/resolve/3084dd417b5e2567e786340037cd3b512068fad0/SmolLM2-1.7B-Instruct-Q4_K_M.gguf',
+    sourceRepository: 'bartowski/SmolLM2-1.7B-Instruct-GGUF',
+    sourcePublisher: 'HuggingFaceTB / bartowski',
+    licenseSummary: 'Apache-2.0',
+    expectedFileSizeBytes: 1055609824,
+    expectedFileSizeLabel: '1.06 GB',
     template: 'chatml',
-    description: 'Maxlite AI Model for devices with limited memory.',
-    sha256: '9acfc1e001311f34b4252001b626f2e466d592a42065f66571bff3790d4e1b14',
-    minimumAvailableRamGb: minimumLiteAvailableRamGb,
+    description: 'Lightweight instruction model for everyday local chat.',
+    sha256: '77665ea4815999596525c636fbeb56ba8b080b46ae85efef4f0d986a139834d7',
+    minimumAvailableRamGb: 0,
     maxContextSize: 8192,
     maxOutputTokens: 4096,
   );
 
-  static const maxAiPro = SelectedLocalModel(
-    name: 'MaxPro AI Model',
-    identifier: 'qwen3-4b-q4_k_m',
+  static const maxliteModel2 = SelectedLocalModel(
+    name: 'Maxlite Model 2',
+    identifier: 'maxlite-gemma3-1b-q4_k_m',
+    filename: 'google_gemma-3-1b-it-Q4_K_M.gguf',
+    quantization: 'Q4_K_M',
+    downloadUrl:
+        'https://huggingface.co/bartowski/google_gemma-3-1b-it-GGUF/resolve/116f76234503685a98f572982177b11d44ec8ff1/google_gemma-3-1b-it-Q4_K_M.gguf',
+    sourceRepository: 'bartowski/google_gemma-3-1b-it-GGUF',
+    sourcePublisher: 'Google / bartowski',
+    licenseSummary: 'Google Gemma Terms',
+    expectedFileSizeBytes: 806058496,
+    expectedFileSizeLabel: '806 MB',
+    template: 'gemma',
+    description: 'Compact instruction model tuned for low-memory devices.',
+    sha256: '12bf0fff8815d5f73a3c9b586bd8fee8e7b248c935de70dec367679873d0f29d',
+    minimumAvailableRamGb: 0,
+    maxContextSize: 8192,
+    maxOutputTokens: 4096,
+  );
+
+  static const maxproModel1 = SelectedLocalModel(
+    name: 'MaxPro Model 1',
+    identifier: 'maxpro-phi4-mini-3.8b-q4_k_m',
+    filename: 'microsoft_Phi-4-mini-instruct-Q4_K_M.gguf',
+    quantization: 'Q4_K_M',
+    downloadUrl:
+        'https://huggingface.co/bartowski/microsoft_Phi-4-mini-instruct-GGUF/resolve/faffc28d86d0c0781b4ec92d30e400a6d350a53b/microsoft_Phi-4-mini-instruct-Q4_K_M.gguf',
+    sourceRepository: 'bartowski/microsoft_Phi-4-mini-instruct-GGUF',
+    sourcePublisher: 'Microsoft / bartowski',
+    licenseSummary: 'MIT',
+    expectedFileSizeBytes: 2491874688,
+    expectedFileSizeLabel: '2.49 GB',
+    template: 'chatml',
+    description: 'Larger instruction model suited to complex local tasks.',
+    sha256: '01999f17c39cc3074afae5e9c539bc82d45f2dd7faa3917c66cbef76fce8c0c2',
+    minimumAvailableRamGb: 0,
+    minimumTotalRamGb: proMinimumTotalRamGb,
+    maxContextSize: 8192,
+    maxOutputTokens: 4096,
+  );
+
+  static const maxproModel2 = SelectedLocalModel(
+    name: 'MaxPro Model 2',
+    identifier: 'maxpro-qwen3-4b-q4_k_m',
     filename: 'Qwen3-4B-Q4_K_M.gguf',
     quantization: 'Q4_K_M',
     downloadUrl:
@@ -104,53 +147,51 @@ class AutomaticModelPolicy {
     expectedFileSizeBytes: 2497280256,
     expectedFileSizeLabel: '2.50 GB',
     template: 'chatml',
-    description: 'MaxPro AI Model for devices with higher resource headroom.',
+    description: 'Instruction model for technical and multilingual tasks.',
     sha256: '7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5',
-    minimumAvailableRamGb: minimumProAvailableRamGb,
+    minimumAvailableRamGb: 0,
+    minimumTotalRamGb: proMinimumTotalRamGb,
     maxContextSize: 8192,
     maxOutputTokens: 4096,
   );
 
+  static const List<SelectedLocalModel> supportedModels = [
+    maxliteModel1,
+    maxliteModel2,
+    maxproModel1,
+    maxproModel2,
+  ];
+
   static int requiredDownloadStorageBytes(SelectedLocalModel model) =>
       model.expectedFileSizeBytes * 2 + temporaryStorageOverheadBytes;
 
+  static SelectedLocalModel? modelForIdentifier(String identifier) {
+    for (final model in supportedModels) {
+      if (model.identifier == identifier) return model;
+    }
+    return null;
+  }
+
+  static SelectedLocalModel? modelForFilename(String filename) {
+    for (final model in supportedModels) {
+      if (model.filename == filename) return model;
+    }
+    return null;
+  }
+
   static String displayNameForFilename(String filename) {
-    if (filename == maxAiLite.filename || filename == maxAiLite.identifier) {
-      return maxAiLite.name;
+    final selected = modelForFilename(filename);
+    if (selected != null) return selected.name;
+    if (filename == 'Qwen_Qwen3-0.6B-Q4_K_M.gguf') {
+      return 'Maxlite AI Model';
     }
-    if (filename == maxAiPro.filename || filename == maxAiPro.identifier) {
-      return maxAiPro.name;
-    }
+    if (filename == 'Qwen3-4B-Q4_K_M.gguf') return 'MaxPro AI Model';
     final basename = filename.split(RegExp(r'[/\\]')).last;
     return basename.replaceFirst(RegExp(r'\.gguf$', caseSensitive: false), '');
   }
-
-  static SelectedLocalModel? selectForHardware({
-    required double? totalRamGb,
-    required double? availableRamGb,
-    required int? freeStorageBytes,
-  }) {
-    if (totalRamGb == null || !totalRamGb.isFinite || totalRamGb < 2.0) {
-      return null;
-    }
-    if (freeStorageBytes == null ||
-        freeStorageBytes < requiredDownloadStorageBytes(maxAiLite)) {
-      return null;
-    }
-
-    final hasAvailableRam = availableRamGb != null &&
-        availableRamGb.isFinite &&
-        availableRamGb >= 0;
-    final canRunPro = totalRamGb >= ramThresholdGb &&
-        hasAvailableRam &&
-        availableRamGb >= minimumProAvailableRamGb &&
-        freeStorageBytes >= requiredDownloadStorageBytes(maxAiPro);
-    if (canRunPro) return maxAiPro;
-    return maxAiLite;
-  }
 }
 
-/// Reads device resources and exposes only the automatically selected model.
+/// Tracks physical resources and the user's active model choice.
 class ModelSelectionService extends GetxService {
   ModelSelectionService({
     AvailableRamReader? availableRamReader,
@@ -159,6 +200,8 @@ class ModelSelectionService extends GetxService {
   })  : _availableRamReader = availableRamReader,
         _totalRamReader = totalRamReader,
         _availableStorageReader = availableStorageReader;
+
+  static const selectedModelSettingKey = 'selected_local_model_identifier';
 
   final AvailableRamReader? _availableRamReader;
   final TotalRamReader? _totalRamReader;
@@ -180,79 +223,115 @@ class ModelSelectionService extends GetxService {
   }
 
   Future<void> refreshSelection() async {
-    DeviceEligibilityResult? eligibilityResult;
-    if (Get.isRegistered<DeviceEligibilityService>()) {
-      final eligibility = Get.find<DeviceEligibilityService>();
-      final result = await eligibility.refreshEligibility();
-      eligibilityResult = result;
-      if (!result.isEligible) {
-        selectedModel.value = null;
-        totalRamGb.value = result.totalRamGb;
-        availableRamGb.value = null;
-        freeStorageBytes.value = result.freeStorageBytes;
-        ramDetectionStatus.value = RamDetectionStatus.unavailable;
-        selectionMessage.value = result.message;
-        return;
-      }
-    }
+    await refreshHardwareInfo();
+    final hive =
+        Get.isRegistered<HiveService>() ? Get.find<HiveService>() : null;
+    var identifier = hive?.getSetting<String>(selectedModelSettingKey);
+    identifier ??= _legacySelectionIdentifier(hive?.getSetting<String>(
+      AppConstants.keyLocalModelName,
+    ));
 
-    double? measuredTotalRamGb = eligibilityResult?.totalRamGb;
-    double? measuredRamGb;
-    int? measuredStorageBytes = eligibilityResult?.freeStorageBytes;
-    try {
-      measuredRamGb = await (_availableRamReader ?? _readAvailableRam)();
-    } catch (_) {
-      measuredRamGb = null;
-    }
-    try {
-      measuredTotalRamGb ??= await (_totalRamReader ?? _readTotalRam)();
-    } catch (_) {
-      measuredTotalRamGb = null;
-    }
-    try {
-      measuredStorageBytes ??=
-          await (_availableStorageReader ?? _readAvailableStorage)();
-    } catch (_) {
-      measuredStorageBytes = null;
-    }
+    var selected = identifier == null
+        ? AutomaticModelPolicy.maxliteModel1
+        : AutomaticModelPolicy.modelForIdentifier(identifier);
+    selected ??= AutomaticModelPolicy.maxliteModel1;
 
-    final hasMeasurement =
-        measuredRamGb != null && measuredRamGb.isFinite && measuredRamGb >= 0;
-    totalRamGb.value = measuredTotalRamGb;
-    availableRamGb.value = hasMeasurement ? measuredRamGb : null;
-    freeStorageBytes.value = measuredStorageBytes;
-    ramDetectionStatus.value = hasMeasurement
-        ? RamDetectionStatus.detected
-        : RamDetectionStatus.unavailable;
-    final selected = AutomaticModelPolicy.selectForHardware(
-      totalRamGb: totalRamGb.value,
-      availableRamGb: availableRamGb.value,
-      freeStorageBytes: freeStorageBytes.value,
-    );
+    if (!isModelCompatible(selected)) {
+      selected = AutomaticModelPolicy.maxliteModel1;
+      selectionMessage.value = _proCompatibilityMessage();
+    } else {
+      selectionMessage.value = '${selected.name} selected for this device.';
+    }
     selectedModel.value = selected;
-    selectionMessage.value = selected == null
-        ? 'MaxAI could not verify the minimum device memory or free storage required for local AI.'
-        : selected == AutomaticModelPolicy.maxAiPro
-            ? '${AutomaticModelPolicy.maxAiPro.name} selected automatically for this device.'
-            : !hasMeasurement
-                ? '${AutomaticModelPolicy.maxAiLite.name} selected automatically. Available RAM could not be measured, so a conservative inference configuration will be tried.'
-                : measuredRamGb < 1.0
-                    ? '${AutomaticModelPolicy.maxAiLite.name} selected automatically. Current memory pressure will use a smaller inference configuration.'
-                    : '${AutomaticModelPolicy.maxAiLite.name} selected automatically for this device.';
-
+    await hive?.setSetting(selectedModelSettingKey, selected.identifier);
     _logSelection();
   }
 
+  Future<void> refreshHardwareInfo() async {
+    double? measuredTotal;
+    double? measuredAvailable;
+    int? measuredStorage;
+    try {
+      measuredTotal = await (_totalRamReader ?? _readTotalRam)();
+    } catch (_) {}
+    try {
+      measuredAvailable = await (_availableRamReader ?? _readAvailableRam)();
+    } catch (_) {}
+    try {
+      measuredStorage =
+          await (_availableStorageReader ?? _readAvailableStorage)();
+    } catch (_) {}
+
+    totalRamGb.value = _validRam(measuredTotal);
+    availableRamGb.value = _validRam(measuredAvailable);
+    freeStorageBytes.value = measuredStorage != null && measuredStorage >= 0
+        ? measuredStorage
+        : null;
+    ramDetectionStatus.value = totalRamGb.value == null
+        ? RamDetectionStatus.unavailable
+        : RamDetectionStatus.detected;
+  }
+
+  bool isModelCompatible(SelectedLocalModel model) {
+    if (!model.requiresProHardware) return true;
+    final ram = totalRamGb.value;
+    return ram != null && ram.isFinite && ram >= model.minimumTotalRamGb;
+  }
+
+  String compatibilityMessage(SelectedLocalModel model) {
+    if (!model.requiresProHardware) return '';
+    final ram = totalRamGb.value;
+    if (ram == null || !ram.isFinite) {
+      return 'MaxAI could not verify physical RAM. MaxPro models require at least 4 GB of physical RAM.';
+    }
+    return ram < model.minimumTotalRamGb
+        ? 'Requires at least 4GB RAM. Incompatible with this device.'
+        : '';
+  }
+
+  Future<bool> selectModel(String identifier) async {
+    await refreshHardwareInfo();
+    final model = AutomaticModelPolicy.modelForIdentifier(identifier);
+    if (model == null) {
+      selectionMessage.value = 'This model is not supported.';
+      return false;
+    }
+    if (!isModelCompatible(model)) {
+      selectionMessage.value = compatibilityMessage(model);
+      return false;
+    }
+
+    selectedModel.value = model;
+    selectionMessage.value = '${model.name} is selected.';
+    if (Get.isRegistered<HiveService>()) {
+      await Get.find<HiveService>()
+          .setSetting(selectedModelSettingKey, model.identifier);
+    }
+    return true;
+  }
+
+  String? _legacySelectionIdentifier(String? filename) {
+    if (filename == 'Qwen_Qwen3-0.6B-Q4_K_M.gguf') {
+      return AutomaticModelPolicy.maxliteModel1.identifier;
+    }
+    if (filename == 'Qwen3-4B-Q4_K_M.gguf') {
+      return AutomaticModelPolicy.maxproModel2.identifier;
+    }
+    return null;
+  }
+
+  double? _validRam(double? value) =>
+      value != null && value.isFinite && value >= 0 ? value : null;
+
   Future<double?> _readAvailableRam() async {
     final deviceInfo = Get.find<DeviceInfoService>();
-    if (!deviceInfo.hasAvailableRamMeasurement.value) {
-      return null;
-    }
+    if (!deviceInfo.hasAvailableRamMeasurement.value) return null;
     return deviceInfo.availableRamGB.value;
   }
 
   Future<double?> _readTotalRam() async {
     final deviceInfo = Get.find<DeviceInfoService>();
+    await deviceInfo.refreshMemoryInfo();
     if (!deviceInfo.hasTotalRamMeasurement.value) return null;
     return deviceInfo.totalRamGB.value;
   }
@@ -260,16 +339,22 @@ class ModelSelectionService extends GetxService {
   Future<int?> _readAvailableStorage() =>
       Get.find<DownloadService>().getAvailableStorageBytes();
 
+  String _proCompatibilityMessage() {
+    final ram = totalRamGb.value;
+    if (ram == null) {
+      return 'Maxlite Model 1 selected. Physical RAM could not be verified; MaxPro models remain locked.';
+    }
+    return 'Maxlite Model 1 selected. MaxPro models require at least 4GB physical RAM.';
+  }
+
   void _logSelection() {
     if (!Get.isRegistered<AppLogService>()) return;
     final selected = selectedModel.value;
     if (selected == null) return;
-    final ram = availableRamGb.value;
-    final source = ram == null
-        ? 'available RAM unavailable; conservative fallback'
-        : '${ram.toStringAsFixed(2)} GB available RAM';
+    final ram = totalRamGb.value;
     Get.find<AppLogService>().info(
-      '[ModelSelection] ${selected.identifier} selected from $source',
+      '[ModelSelection] ${selected.identifier}; total RAM: '
+      '${ram == null ? 'unavailable' : '${ram.toStringAsFixed(2)} GB'}',
     );
   }
 }

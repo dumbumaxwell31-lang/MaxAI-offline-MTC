@@ -11,6 +11,7 @@ import 'model_selection_service.dart';
 
 enum AutomaticModelDownloadState {
   checking,
+  missing,
   ready,
   waitingForNetwork,
   downloading,
@@ -110,7 +111,7 @@ typedef AvailableStorageReader = Future<int?> Function();
 typedef SelectedModelReader = SelectedLocalModel? Function();
 typedef DeviceEligibilityChecker = Future<DeviceEligibilityResult> Function();
 
-/// Coordinates startup downloads for the single RAM-selected GGUF model.
+/// Validates all catalog entries and coordinates explicitly requested downloads.
 class AutomaticModelDownloadService extends GetxService {
   AutomaticModelDownloadService({
     SelectedModelValidator? validator,
@@ -139,10 +140,15 @@ class AutomaticModelDownloadService extends GetxService {
   final downloadedBytes = 0.obs;
   final totalBytes = 0.obs;
   final progress = 0.0.obs;
+  final modelStates = <String, AutomaticModelDownloadState>{}.obs;
+  final modelStatusMessages = <String, String>{}.obs;
+  final modelFailureMessages = <String, String>{}.obs;
+  final modelProgress = <String, double>{}.obs;
 
   Worker? _downloadWatcher;
-  Future<void>? _inFlightCheck;
-  DeviceEligibilityResult? _lastEligibility;
+  SelectedLocalModel? _activeModel;
+  final Map<String, Future<void>> _inFlightDownloads = {};
+  final Map<String, Future<void>> _inFlightValidations = {};
 
   bool get isReady => state.value == AutomaticModelDownloadState.ready;
   bool get isDownloading =>
@@ -151,16 +157,16 @@ class AutomaticModelDownloadService extends GetxService {
       state.value == AutomaticModelDownloadState.waitingForNetwork ||
       state.value == AutomaticModelDownloadState.insufficientStorage ||
       state.value == AutomaticModelDownloadState.failed ||
-      (state.value == AutomaticModelDownloadState.ineligible &&
-          (_lastEligibility?.canRetry ?? true));
+      state.value == AutomaticModelDownloadState.ineligible;
 
-  int get requiredStorageBytes =>
-      currentModel.expectedFileSizeBytes * 2 + 64 * 1024 * 1024;
+  int get requiredStorageBytes => selectedModel == null
+      ? 0
+      : AutomaticModelPolicy.requiredDownloadStorageBytes(selectedModel!);
 
   SelectedLocalModel? get selectedModel =>
       (_selectedModelReader ?? _readSelectedModel)();
 
-  SelectedLocalModel get currentModel => selectedModel!;
+  SelectedLocalModel? get currentModel => _activeModel ?? selectedModel;
 
   Future<AutomaticModelDownloadService> init() async {
     if (_downloadStarter == null) {
@@ -169,133 +175,246 @@ class AutomaticModelDownloadService extends GetxService {
         (_) => unawaited(_reconcileDownloadCompletion()),
       );
     }
-    unawaited(ensureSelectedModel());
+    final selected = selectedModel;
+    if (selected != null) await inspectModel(selected);
     return this;
   }
 
-  Future<void> ensureSelectedModel({bool forceRetry = false}) {
-    if (!forceRetry && _inFlightCheck != null) return _inFlightCheck!;
-    if (!forceRetry && isDownloading) return Future.value();
+  Future<void> ensureSelectedModel() async {
+    final model = selectedModel;
+    if (model == null) {
+      state.value = AutomaticModelDownloadState.failed;
+      statusMessage.value = 'Select a local model from the Models hub.';
+      failureMessage.value = statusMessage.value;
+      return;
+    }
+    await inspectModel(model);
+  }
 
-    final check = _ensureSelectedModel();
-    _inFlightCheck = check;
-    return check.whenComplete(() {
-      if (identical(_inFlightCheck, check)) {
-        _inFlightCheck = null;
+  Future<void> retrySelectedModelDownload() async {
+    final model = selectedModel;
+    if (model != null) await downloadModel(model, forceRetry: true);
+  }
+
+  Future<void> inspectModel(SelectedLocalModel model) {
+    final existing = _inFlightValidations[model.identifier];
+    if (existing != null) return existing;
+    final validation = _inspectModel(model);
+    _inFlightValidations[model.identifier] = validation;
+    return validation.whenComplete(() {
+      if (identical(_inFlightValidations[model.identifier], validation)) {
+        _inFlightValidations.remove(model.identifier);
       }
     });
   }
 
-  Future<void> retrySelectedModelDownload() =>
-      ensureSelectedModel(forceRetry: true);
-
-  Future<void> completeDownload() async {
+  Future<void> _inspectModel(SelectedLocalModel model) async {
+    _activeModel = model;
+    _setForModel(
+      model,
+      AutomaticModelDownloadState.checking,
+      'Checking ${model.name}.',
+    );
     try {
-      state.value = AutomaticModelDownloadState.checking;
-      final validation = await _validate(currentModel);
+      final validation = await _validate(model);
       if (validation.isValid) {
-        _setReady();
+        _setReady(model);
+      } else if (Get.isRegistered<DownloadService>() &&
+          Get.find<DownloadService>()
+              .activeDownloads
+              .containsKey(model.filename)) {
+        final active =
+            Get.find<DownloadService>().activeDownloads[model.filename]!;
+        updateProgress(
+          receivedBytes: active.downloadedBytes.value,
+          expectedBytes: active.totalBytes.value > 0
+              ? active.totalBytes.value
+              : model.expectedFileSizeBytes,
+          model: model,
+        );
       } else {
-        _setFailure(validation.message);
+        _setForModel(
+          model,
+          AutomaticModelDownloadState.missing,
+          '${model.name} is not downloaded yet.',
+        );
       }
     } catch (error) {
-      _setFailure(_friendlyDownloadError(error));
+      _setFailure(model, _friendlyDownloadError(error));
     }
   }
 
-  void updateProgress(
-      {required int receivedBytes, required int expectedBytes}) {
-    downloadedBytes.value = receivedBytes;
-    totalBytes.value = expectedBytes;
-    progress.value = expectedBytes <= 0
-        ? 0
-        : (receivedBytes / expectedBytes).clamp(0.0, 1.0).toDouble();
+  Future<void> downloadModel(
+    SelectedLocalModel model, {
+    bool forceRetry = false,
+  }) {
+    final existing = _inFlightDownloads[model.identifier];
+    if (existing != null) return existing;
+    if (!forceRetry &&
+        modelStates[model.identifier] ==
+            AutomaticModelDownloadState.downloading) {
+      return Future.value();
+    }
+    final download = _downloadModel(model);
+    _inFlightDownloads[model.identifier] = download;
+    return download.whenComplete(() {
+      if (identical(_inFlightDownloads[model.identifier], download)) {
+        _inFlightDownloads.remove(model.identifier);
+      }
+    });
   }
 
-  Future<void> _ensureSelectedModel() async {
+  Future<void> _downloadModel(SelectedLocalModel model) async {
+    _activeModel = model;
     try {
-      final eligibility = await _checkEligibility();
-      _lastEligibility = eligibility;
-      if (!eligibility.isEligible) {
-        _setIneligible(eligibility);
+      _setForModel(
+        model,
+        AutomaticModelDownloadState.checking,
+        'Checking ${model.name}.',
+      );
+      final currentValidation = await _validate(model);
+      if (currentValidation.isValid) {
+        _setReady(model);
         return;
       }
 
-      if (_selectedModelReader == null) {
-        await Get.find<ModelSelectionService>().refreshSelection();
-        final selected = selectedModel;
-        if (selected == null) {
-          _lastEligibility = null;
-          state.value = AutomaticModelDownloadState.ineligible;
-          statusMessage.value =
-              Get.find<ModelSelectionService>().selectionMessage.value;
-          failureMessage.value = statusMessage.value;
-          return;
-        }
-      }
-      final model = currentModel;
-      state.value = AutomaticModelDownloadState.checking;
-      statusMessage.value = 'Checking ${model.name}.';
-      failureMessage.value = '';
-
-      final validation = await _validate(model);
-      if (validation.isValid) {
-        _setReady();
+      final eligibility = await _checkEligibility(model);
+      if (!eligibility.isEligible) {
+        _setIneligible(model, eligibility);
         return;
       }
 
       if (!await _hasNetworkConnection()) {
-        state.value = AutomaticModelDownloadState.waitingForNetwork;
-        statusMessage.value =
-            'Connect to the internet to download ${model.name} for offline use.';
+        _setForModel(
+          model,
+          AutomaticModelDownloadState.waitingForNetwork,
+          'Connect to the internet to download ${model.name}.',
+        );
         return;
       }
 
       final availableStorage = await _readAvailableStorage();
-      if (availableStorage == null || availableStorage < requiredStorageBytes) {
-        state.value = AutomaticModelDownloadState.insufficientStorage;
-        statusMessage.value =
-            'Not enough free storage to download ${model.name} safely.';
-        failureMessage.value = availableStorage == null
+      final required = AutomaticModelPolicy.requiredDownloadStorageBytes(model);
+      if (availableStorage == null || availableStorage < required) {
+        final detail = availableStorage == null
             ? 'Unable to determine available app storage.'
-            : 'Requires about ${DownloadService.formatBytes(requiredStorageBytes)} free storage; ${DownloadService.formatBytes(availableStorage)} is available.';
+            : 'Requires at least ${DownloadService.formatBytes(required)} free; '
+                '${DownloadService.formatBytes(availableStorage)} is available.';
+        _setForModel(
+          model,
+          AutomaticModelDownloadState.insufficientStorage,
+          'Not enough free storage to download ${model.name}.',
+          failure: detail,
+        );
         return;
       }
 
-      state.value = AutomaticModelDownloadState.downloading;
-      statusMessage.value = 'Downloading ${model.name}.';
-      failureMessage.value = '';
+      _setForModel(
+        model,
+        AutomaticModelDownloadState.downloading,
+        'Downloading ${model.name}.',
+      );
       final result = await _startDownload(model);
       if (result == AutomaticDownloadStartResult.completed) {
-        await completeDownload();
+        await completeDownload(model);
+      } else if (result == AutomaticDownloadStartResult.alreadyInProgress) {
+        _setForModel(
+          model,
+          AutomaticModelDownloadState.downloading,
+          'Downloading ${model.name}.',
+        );
       }
     } catch (error) {
-      _setFailure(_friendlyDownloadError(error));
+      _setFailure(model, _friendlyDownloadError(error));
     }
   }
 
-  Future<void> _reconcileDownloadCompletion() async {
-    if (_downloadStarter != null || !isDownloading) return;
-
-    final downloadService = Get.find<DownloadService>();
-    final filename = currentModel.filename;
-    final active = downloadService.activeDownloads[filename];
-    if (active != null) {
-      updateProgress(
-        receivedBytes: active.downloadedBytes.value,
-        expectedBytes: active.totalBytes.value > 0
-            ? active.totalBytes.value
-            : currentModel.expectedFileSizeBytes,
+  Future<void> completeDownload([SelectedLocalModel? model]) async {
+    final target = model ?? currentModel;
+    if (target == null) return;
+    _activeModel = target;
+    try {
+      _setForModel(
+        target,
+        AutomaticModelDownloadState.checking,
+        'Validating ${target.name}.',
       );
-      return;
+      final validation = await _validate(target);
+      if (validation.isValid) {
+        _setReady(target);
+      } else {
+        _setFailure(target, validation.message);
+      }
+    } catch (error) {
+      _setFailure(target, _friendlyDownloadError(error));
     }
+  }
 
-    final failure = downloadService.failedDownloads[filename];
-    if (failure != null && failure.isNotEmpty) {
-      _setFailure(failure);
-      return;
+  void updateProgress({
+    required int receivedBytes,
+    required int expectedBytes,
+    SelectedLocalModel? model,
+  }) {
+    final target = model ?? currentModel;
+    if (target == null) return;
+    final safeReceived = receivedBytes.clamp(0, 1 << 62);
+    final safeExpected = expectedBytes;
+    final value = safeExpected <= 0
+        ? 0.0
+        : (safeReceived / safeExpected).clamp(0.0, 1.0).toDouble();
+    modelProgress[target.identifier] = value;
+    if (selectedModel?.identifier == target.identifier) {
+      downloadedBytes.value = safeReceived;
+      totalBytes.value = safeExpected;
+      progress.value = value;
     }
-    await completeDownload();
+    if (modelStates[target.identifier] !=
+        AutomaticModelDownloadState.downloading) {
+      _setForModel(
+        target,
+        AutomaticModelDownloadState.downloading,
+        'Downloading ${target.name}.',
+      );
+    }
+  }
+
+  AutomaticModelDownloadState statusFor(SelectedLocalModel model) =>
+      modelStates[model.identifier] ?? AutomaticModelDownloadState.checking;
+
+  String statusMessageFor(SelectedLocalModel model) =>
+      modelStatusMessages[model.identifier] ?? 'Checking ${model.name}.';
+
+  String failureMessageFor(SelectedLocalModel model) =>
+      modelFailureMessages[model.identifier] ?? '';
+
+  double progressFor(SelectedLocalModel model) =>
+      modelProgress[model.identifier] ?? 0;
+
+  Future<void> _reconcileDownloadCompletion() async {
+    if (_downloadStarter != null) return;
+    final service = Get.find<DownloadService>();
+    for (final model in AutomaticModelPolicy.supportedModels) {
+      final active = service.activeDownloads[model.filename];
+      if (active != null) {
+        _activeModel = model;
+        updateProgress(
+          receivedBytes: active.downloadedBytes.value,
+          expectedBytes: active.totalBytes.value > 0
+              ? active.totalBytes.value
+              : model.expectedFileSizeBytes,
+          model: model,
+        );
+        continue;
+      }
+
+      final failure = service.failedDownloads[model.filename];
+      if (failure != null && failure.isNotEmpty) {
+        _setFailure(model, failure);
+      } else if (modelStates[model.identifier] ==
+          AutomaticModelDownloadState.downloading) {
+        await completeDownload(model);
+      }
+    }
   }
 
   Future<ModelFileValidation> _validate(SelectedLocalModel model) {
@@ -327,14 +446,52 @@ class AutomaticModelDownloadService extends GetxService {
     if (result == 'ALREADY_DOWNLOADING') {
       return AutomaticDownloadStartResult.alreadyInProgress;
     }
-    if (result.startsWith('INELIGIBLE:')) {
-      _setIneligible(Get.find<DeviceEligibilityService>().currentResult);
-      return AutomaticDownloadStartResult.alreadyInProgress;
-    }
     if (result == 'NATIVE_BACKGROUND_STARTED') {
       return AutomaticDownloadStartResult.started;
     }
-    return AutomaticDownloadStartResult.completed;
+    throw StateError(result);
+  }
+
+  Future<DeviceEligibilityResult> _checkEligibility(
+      SelectedLocalModel model) async {
+    if (!model.requiresProHardware) {
+      return const DeviceEligibilityResult(
+        status: DeviceEligibilityStatus.eligible,
+      );
+    }
+    final checker = _eligibilityChecker;
+    if (checker != null) return checker();
+    if (_selectedModelReader != null &&
+        !Get.isRegistered<ModelSelectionService>()) {
+      return const DeviceEligibilityResult(
+        status: DeviceEligibilityStatus.eligible,
+      );
+    }
+    if (Get.isRegistered<ModelSelectionService>()) {
+      final selection = Get.find<ModelSelectionService>();
+      await selection.refreshHardwareInfo();
+      final ram = selection.totalRamGb.value;
+      if (ram == null) {
+        return const DeviceEligibilityResult(
+          status: DeviceEligibilityStatus.unavailable,
+          requiredRamGb: AutomaticModelPolicy.proMinimumTotalRamGb,
+        );
+      }
+      if (ram < model.minimumTotalRamGb) {
+        return DeviceEligibilityResult(
+          status: DeviceEligibilityStatus.insufficientRam,
+          totalRamGb: ram,
+          requiredRamGb: model.minimumTotalRamGb,
+        );
+      }
+      return DeviceEligibilityResult(
+        status: DeviceEligibilityStatus.eligible,
+        totalRamGb: ram,
+      );
+    }
+    return const DeviceEligibilityResult(
+      status: DeviceEligibilityStatus.eligible,
+    );
   }
 
   Future<bool> _hasNetworkConnection() async {
@@ -355,45 +512,66 @@ class AutomaticModelDownloadService extends GetxService {
     return Get.find<DownloadService>().getAvailableStorageBytes();
   }
 
-  Future<DeviceEligibilityResult> _checkEligibility() {
-    final checker = _eligibilityChecker;
-    if (checker != null) return checker();
-    if (_selectedModelReader != null) {
-      return Future.value(const DeviceEligibilityResult(
-        status: DeviceEligibilityStatus.eligible,
-      ));
-    }
-    return Get.find<DeviceEligibilityService>().refreshEligibility();
-  }
-
   SelectedLocalModel? _readSelectedModel() =>
       Get.find<ModelSelectionService>().selectedModel.value;
 
-  void _setReady() {
-    state.value = AutomaticModelDownloadState.ready;
-    statusMessage.value = '${currentModel.name} is ready for local use.';
-    failureMessage.value = '';
-    progress.value = 1;
-    totalBytes.value = currentModel.expectedFileSizeBytes;
-    downloadedBytes.value = totalBytes.value;
+  void _setForModel(
+    SelectedLocalModel model,
+    AutomaticModelDownloadState nextState,
+    String message, {
+    String failure = '',
+  }) {
+    modelStates[model.identifier] = nextState;
+    modelStatusMessages[model.identifier] = message;
+    modelFailureMessages[model.identifier] = failure;
+    if (nextState != AutomaticModelDownloadState.downloading) {
+      if (nextState == AutomaticModelDownloadState.ready) {
+        modelProgress[model.identifier] = 1;
+      } else if (nextState != AutomaticModelDownloadState.checking) {
+        modelProgress[model.identifier] = 0;
+      }
+    }
+    if (selectedModel?.identifier == model.identifier) {
+      state.value = nextState;
+      statusMessage.value = message;
+      failureMessage.value = failure;
+      progress.value = modelProgress[model.identifier] ?? 0;
+      if (nextState == AutomaticModelDownloadState.ready) {
+        totalBytes.value = model.expectedFileSizeBytes;
+        downloadedBytes.value = totalBytes.value;
+      } else if (nextState != AutomaticModelDownloadState.downloading) {
+        downloadedBytes.value = 0;
+        totalBytes.value = model.expectedFileSizeBytes;
+      }
+    }
   }
 
-  void _setFailure(String message) {
-    final model = selectedModel;
-    state.value = AutomaticModelDownloadState.failed;
-    statusMessage.value = model == null
-        ? 'Unable to prepare local AI.'
-        : 'Unable to download ${model.name}.';
-    failureMessage.value = message;
+  void _setReady(SelectedLocalModel model) {
+    modelProgress[model.identifier] = 1;
+    _setForModel(
+      model,
+      AutomaticModelDownloadState.ready,
+      '${model.name} is ready for local use.',
+    );
   }
 
-  void _setIneligible(DeviceEligibilityResult eligibility) {
-    state.value = AutomaticModelDownloadState.ineligible;
-    statusMessage.value = eligibility.message;
-    failureMessage.value = eligibility.detailMessage;
-    downloadedBytes.value = 0;
-    totalBytes.value = 0;
-    progress.value = 0;
+  void _setFailure(SelectedLocalModel model, String message) {
+    _setForModel(
+      model,
+      AutomaticModelDownloadState.failed,
+      'Unable to prepare ${model.name}.',
+      failure: message,
+    );
+  }
+
+  void _setIneligible(
+      SelectedLocalModel model, DeviceEligibilityResult eligibility) {
+    _setForModel(
+      model,
+      AutomaticModelDownloadState.ineligible,
+      eligibility.message,
+      failure: eligibility.detailMessage,
+    );
   }
 
   String _friendlyDownloadError(Object error) {

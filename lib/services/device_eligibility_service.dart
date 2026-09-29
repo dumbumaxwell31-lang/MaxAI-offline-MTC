@@ -19,11 +19,15 @@ class DeviceEligibilityResult {
     required this.status,
     this.totalRamGb,
     this.freeStorageBytes,
+    this.requiredRamGb = 0,
+    this.requiredStorageBytes = 0,
   });
 
   final DeviceEligibilityStatus status;
   final double? totalRamGb;
   final int? freeStorageBytes;
+  final double requiredRamGb;
+  final int requiredStorageBytes;
 
   bool get isEligible => status == DeviceEligibilityStatus.eligible;
 
@@ -34,15 +38,15 @@ class DeviceEligibilityResult {
   String get message {
     switch (status) {
       case DeviceEligibilityStatus.checking:
-        return 'Checking whether this device can run local AI.';
+        return 'Checking device resources.';
       case DeviceEligibilityStatus.eligible:
-        return 'This device is ready for local AI.';
+        return 'This model is compatible with the available device resources.';
       case DeviceEligibilityStatus.insufficientRam:
-        return 'This device needs at least 2 GB of memory for local AI.';
+        return 'Requires at least 4GB RAM. Incompatible with this device.';
       case DeviceEligibilityStatus.insufficientStorage:
-        return 'Free at least 2 GB of storage to use local AI.';
+        return 'Not enough free storage to download this model safely.';
       case DeviceEligibilityStatus.unavailable:
-        return 'MaxAI could not check this device\'s resources.';
+        return 'MaxAI could not verify the required device resources.';
     }
   }
 
@@ -50,14 +54,15 @@ class DeviceEligibilityResult {
     switch (status) {
       case DeviceEligibilityStatus.insufficientRam:
         return totalRamGb == null
-            ? ''
-            : '${totalRamGb!.toStringAsFixed(1)} GB memory is available; 2 GB is required.';
+            ? 'At least ${requiredRamGb.toStringAsFixed(0)} GB physical RAM is required.'
+            : '${totalRamGb!.toStringAsFixed(1)} GB physical RAM detected; '
+                '${requiredRamGb.toStringAsFixed(0)} GB is required.';
       case DeviceEligibilityStatus.insufficientStorage:
-        return freeStorageBytes == null
-            ? ''
-            : '${DownloadService.formatBytes(freeStorageBytes!)} free; at least 2 GB is required.';
+        if (freeStorageBytes == null) return '';
+        return '${DownloadService.formatBytes(freeStorageBytes!)} free; '
+            '${DownloadService.formatBytes(requiredStorageBytes)} required.';
       case DeviceEligibilityStatus.unavailable:
-        return 'Try again after device resources become available.';
+        return 'Check storage and device information, then retry.';
       case DeviceEligibilityStatus.checking:
       case DeviceEligibilityStatus.eligible:
         return '';
@@ -65,7 +70,7 @@ class DeviceEligibilityResult {
   }
 }
 
-/// Enforces the device-wide minimum before local model selection or download.
+/// Checks per-model hardware requirements and per-download storage needs.
 class DeviceEligibilityService extends GetxService {
   DeviceEligibilityService({
     TotalRamReader? totalRamReader,
@@ -73,8 +78,7 @@ class DeviceEligibilityService extends GetxService {
   })  : _totalRamReader = totalRamReader,
         _freeStorageReader = freeStorageReader;
 
-  static const minimumTotalRamGb = 2.0;
-  static const minimumFreeStorageBytes = 2 * 1024 * 1024 * 1024;
+  static const minimumTotalRamGb = 4.0;
 
   final TotalRamReader? _totalRamReader;
   final FreeStorageReader? _freeStorageReader;
@@ -82,7 +86,7 @@ class DeviceEligibilityService extends GetxService {
   final status = DeviceEligibilityStatus.checking.obs;
   final totalRamGb = RxnDouble();
   final freeStorageBytes = RxnInt();
-  final statusMessage = 'Checking whether this device can run local AI.'.obs;
+  final statusMessage = 'Checking device resources.'.obs;
   final detailMessage = ''.obs;
 
   bool get isEligible => status.value == DeviceEligibilityStatus.eligible;
@@ -99,7 +103,10 @@ class DeviceEligibilityService extends GetxService {
     return this;
   }
 
-  Future<DeviceEligibilityResult> refreshEligibility() async {
+  Future<DeviceEligibilityResult> refreshEligibility({
+    double requiredRamGb = 0,
+    int requiredStorageBytes = 0,
+  }) async {
     _apply(const DeviceEligibilityResult(
       status: DeviceEligibilityStatus.checking,
     ));
@@ -107,47 +114,57 @@ class DeviceEligibilityService extends GetxService {
     double? totalRam;
     try {
       totalRam = await (_totalRamReader ?? _readTotalRam)();
-    } catch (_) {
+    } catch (_) {}
+    if (totalRam != null && (!totalRam.isFinite || totalRam < 0)) {
       totalRam = null;
     }
 
-    if (totalRam == null || !totalRam.isFinite || totalRam < 0) {
-      return _apply(const DeviceEligibilityResult(
-        status: DeviceEligibilityStatus.unavailable,
-      ));
-    }
-    if (totalRam < minimumTotalRamGb) {
-      return _apply(DeviceEligibilityResult(
-        status: DeviceEligibilityStatus.insufficientRam,
-        totalRamGb: totalRam,
-      ));
+    if (requiredRamGb > 0) {
+      if (totalRam == null) {
+        return _apply(DeviceEligibilityResult(
+          status: DeviceEligibilityStatus.unavailable,
+          requiredRamGb: requiredRamGb,
+        ));
+      }
+      if (totalRam < requiredRamGb) {
+        return _apply(DeviceEligibilityResult(
+          status: DeviceEligibilityStatus.insufficientRam,
+          totalRamGb: totalRam,
+          requiredRamGb: requiredRamGb,
+        ));
+      }
     }
 
     int? freeStorage;
-    try {
-      freeStorage = await (_freeStorageReader ?? _readFreeStorage)();
-    } catch (_) {
-      freeStorage = null;
-    }
-
-    if (freeStorage == null || freeStorage < 0) {
-      return _apply(DeviceEligibilityResult(
-        status: DeviceEligibilityStatus.unavailable,
-        totalRamGb: totalRam,
-      ));
-    }
-    if (freeStorage < minimumFreeStorageBytes) {
-      return _apply(DeviceEligibilityResult(
-        status: DeviceEligibilityStatus.insufficientStorage,
-        totalRamGb: totalRam,
-        freeStorageBytes: freeStorage,
-      ));
+    if (requiredStorageBytes > 0) {
+      try {
+        freeStorage = await (_freeStorageReader ?? _readFreeStorage)();
+      } catch (_) {}
+      if (freeStorage == null || freeStorage < 0) {
+        return _apply(DeviceEligibilityResult(
+          status: DeviceEligibilityStatus.unavailable,
+          totalRamGb: totalRam,
+          requiredRamGb: requiredRamGb,
+          requiredStorageBytes: requiredStorageBytes,
+        ));
+      }
+      if (freeStorage < requiredStorageBytes) {
+        return _apply(DeviceEligibilityResult(
+          status: DeviceEligibilityStatus.insufficientStorage,
+          totalRamGb: totalRam,
+          freeStorageBytes: freeStorage,
+          requiredRamGb: requiredRamGb,
+          requiredStorageBytes: requiredStorageBytes,
+        ));
+      }
     }
 
     return _apply(DeviceEligibilityResult(
       status: DeviceEligibilityStatus.eligible,
       totalRamGb: totalRam,
       freeStorageBytes: freeStorage,
+      requiredRamGb: requiredRamGb,
+      requiredStorageBytes: requiredStorageBytes,
     ));
   }
 

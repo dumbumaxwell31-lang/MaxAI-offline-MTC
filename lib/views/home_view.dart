@@ -3,6 +3,7 @@ import 'package:get/get.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../controllers/home_controller.dart';
 import 'chat_view.dart';
+import 'contact_view.dart';
 import 'settings_view.dart';
 
 class HomeView extends GetView<HomeController> {
@@ -13,6 +14,10 @@ class HomeView extends GetView<HomeController> {
         icon: Icons.bubble_chart_outlined,
         activeIcon: Icons.bubble_chart,
         label: 'Chat'),
+    _NavItem(
+        icon: Icons.contact_support_outlined,
+        activeIcon: Icons.contact_support,
+        label: 'Contact'),
     _NavItem(
         icon: Icons.settings_outlined,
         activeIcon: Icons.settings,
@@ -34,6 +39,7 @@ class HomeView extends GetView<HomeController> {
           index: controller.currentTab.value,
           children: const [
             ChatView(),
+            ContactView(),
             SettingsView(),
           ],
         );

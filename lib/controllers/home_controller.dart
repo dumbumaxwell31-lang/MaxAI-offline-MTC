@@ -7,7 +7,7 @@ import 'model_controller.dart';
 import '../core/constants.dart';
 
 class HomeController extends GetxController {
-  static const tabCount = 2;
+  static const tabCount = 3;
 
   final currentTab = 0.obs;
   bool _resumeDialogShown = false;
