@@ -176,4 +176,57 @@ void main() {
       expect(service.selectedModel.value, AutomaticModelPolicy.maxproModel2);
     });
   });
+
+  group('MaxPro slow-phone warning', () {
+    Future<ModelSelectionService> serviceWithRam(double? ram) async {
+      final service = ModelSelectionService(
+        totalRamReader: () async => ram,
+        availableRamReader: () async => 1.0,
+        availableStorageReader: () async => 0,
+      );
+      await service.init();
+      return service;
+    }
+
+    test('warns for Pro models on 4 GB up to below 8 GB phones', () async {
+      // 4 GB, 6 GB (reports ~5.2) and 6.9 GB reported.
+      for (final ram in [4.0, 5.2, 6.9]) {
+        final service = await serviceWithRam(ram);
+        expect(
+            service.isSlowOnThisDevice(AutomaticModelPolicy.maxproModel1),
+            isTrue,
+            reason: '$ram GB');
+        expect(
+            service.isSlowOnThisDevice(AutomaticModelPolicy.maxproModel2),
+            isTrue,
+            reason: '$ram GB');
+      }
+    });
+
+    test('does not warn on 8 GB phones, which report about 7.2-7.7 GB',
+        () async {
+      for (final ram in [7.2, 7.6, 11.2]) {
+        final service = await serviceWithRam(ram);
+        expect(
+            service.isSlowOnThisDevice(AutomaticModelPolicy.maxproModel2),
+            isFalse,
+            reason: '$ram GB');
+      }
+    });
+
+    test('never warns for Lite models or incompatible phones', () async {
+      final mid = await serviceWithRam(5.2);
+      expect(
+          mid.isSlowOnThisDevice(AutomaticModelPolicy.maxliteModel1), isFalse);
+      expect(
+          mid.isSlowOnThisDevice(AutomaticModelPolicy.maxliteModel2), isFalse);
+
+      for (final ram in [3.5, null]) {
+        final low = await serviceWithRam(ram);
+        expect(low.isSlowOnThisDevice(AutomaticModelPolicy.maxproModel2),
+            isFalse,
+            reason: 'Pro is blocked, not slow, at $ram');
+      }
+    });
+  });
 }

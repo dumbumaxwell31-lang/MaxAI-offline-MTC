@@ -410,13 +410,24 @@ class ChatView extends GetView<ChatController> {
         ),
       ),
       const SizedBox(height: 20),
-      FilledButton.icon(
-        onPressed: ready
-            ? () => models.loadModel(selected.filename)
-            : () => Get.toNamed(AppRoutes.models),
-        icon: Icon(ready ? Icons.play_arrow_rounded : Icons.info_outline),
-        label: Text(ready ? 'Load Model' : 'View Model Status'),
-      ),
+      Obx(() {
+        final busy = models.isModelBusy;
+        return FilledButton.icon(
+          onPressed: ready
+              ? (busy ? null : () => models.loadModel(selected.filename))
+              : () => Get.toNamed(AppRoutes.models),
+          icon: ready && busy
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : Icon(ready ? Icons.play_arrow_rounded : Icons.info_outline),
+          label: Text(ready
+              ? (busy ? 'Loading…' : 'Load Model')
+              : 'View Model Status'),
+        );
+      }),
     ]);
   }
 

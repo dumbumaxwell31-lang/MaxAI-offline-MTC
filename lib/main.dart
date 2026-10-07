@@ -22,6 +22,7 @@ import 'services/model_selection_service.dart';
 import 'services/inference_resource_policy.dart';
 import 'services/app_log_service.dart';
 import 'services/crash_reporting_service.dart';
+import 'services/app_update_service.dart';
 import 'core/constants.dart';
 
 void main() {
@@ -98,11 +99,16 @@ void main() {
     // Keep last model as a quick-load option, but do not auto-load on startup.
     _validateLastModel();
 
+    // Update checks never block startup: registration is synchronous and the
+    // network check starts only after the first frame has been drawn.
+    final appUpdates = Get.put(AppUpdateService());
+
     runApp(const MaxAIApp());
 
     // Apply system UI after frame is rendered so Get.mediaQuery is available
     WidgetsBinding.instance.addPostFrameCallback((_) {
       settingsController.setThemeMode(settingsController.themeMode.value);
+      unawaited(appUpdates.checkForUpdates());
     });
   }, (error, stack) async {
     if (Get.isRegistered<AppLogService>()) {

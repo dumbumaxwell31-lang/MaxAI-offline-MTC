@@ -54,8 +54,16 @@ class ModelView extends GetView<ModelController> {
                       final compatible = controller.isCompatible(model);
                       final selected = controller.isSelected(model);
                       final loaded = controller.isLoaded(model);
-                      final isLoading =
-                          inference.isLoadingModel.value && selected;
+                      final pending = controller.pendingModelFilename.value;
+                      final isLoading = pending == model.filename ||
+                          (pending.isEmpty &&
+                              inference.isLoadingModel.value &&
+                              selected);
+                      final isUnloading =
+                          inference.isUnloadingModel.value && loaded;
+                      final busy = pending.isNotEmpty ||
+                          inference.isLoadingModel.value ||
+                          inference.isUnloadingModel.value;
                       final active =
                           downloadService.activeDownloads[model.filename];
                       final downloaded =
@@ -81,6 +89,9 @@ class ModelView extends GetView<ModelController> {
                         selected: selected,
                         loaded: loaded,
                         isLoading: isLoading,
+                        isUnloading: isUnloading,
+                        slowOnThisPhone: selection.isSlowOnThisDevice(model),
+                        busy: busy,
                         onSelect: () => controller.selectModel(model),
                         onDownload: () => controller.downloadModel(model),
                         onRetry: () =>
@@ -147,6 +158,9 @@ class ModelView extends GetView<ModelController> {
     required bool selected,
     required bool loaded,
     required bool isLoading,
+    required bool isUnloading,
+    required bool slowOnThisPhone,
+    required bool busy,
     required VoidCallback onSelect,
     required VoidCallback onDownload,
     required VoidCallback onRetry,
@@ -218,6 +232,36 @@ class ModelView extends GetView<ModelController> {
                 Icon(Icons.check_circle, color: statusColor, size: 20),
             ],
           ),
+          if (slowOnThisPhone) ...[
+            const SizedBox(height: 10),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: AppColors.warning.withValues(alpha: 0.14),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                    color: AppColors.warning.withValues(alpha: 0.5)),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.speed_rounded,
+                      size: 18, color: AppColors.warning),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      AutomaticModelPolicy.proSlowWarning,
+                      style: GoogleFonts.inter(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.warning,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
           const SizedBox(height: 9),
           Text(
             status,
@@ -288,17 +332,29 @@ class ModelView extends GetView<ModelController> {
                   ),
                   label: const Text('Loading'),
                 )
+              else if (isUnloading)
+                FilledButton.icon(
+                  onPressed: null,
+                  icon: const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                  label: const Text('Unloading'),
+                )
               else if (loaded)
                 FilledButton.icon(
-                  onPressed: onUnload,
+                  onPressed: busy ? null : onUnload,
                   icon: const Icon(Icons.eject_outlined),
                   label: const Text('Unload'),
                 )
               else if (state == AutomaticModelDownloadState.ready && downloaded)
+                // One tap selects this model, unloads the current one and
+                // loads this one.
                 FilledButton.icon(
-                  onPressed: selected ? onLoad : onSelect,
-                  icon: Icon(selected ? Icons.play_arrow_rounded : Icons.check),
-                  label: Text(selected ? 'Load model' : 'Use model'),
+                  onPressed: busy ? null : onLoad,
+                  icon: const Icon(Icons.play_arrow_rounded),
+                  label: const Text('Load model'),
                 )
               else if (state == AutomaticModelDownloadState.downloading)
                 FilledButton.icon(
@@ -336,9 +392,11 @@ class ModelView extends GetView<ModelController> {
                             state ==
                                 AutomaticModelDownloadState.waitingForNetwork
                         ? 'Retry'
-                        : downloaded
-                            ? 'Repair file'
-                            : 'Download',
+                        : state == AutomaticModelDownloadState.checking
+                            ? (downloaded ? 'Verifying file' : 'Checking')
+                            : downloaded
+                                ? 'Repair file'
+                                : 'Download',
                   ),
                 ),
             ],

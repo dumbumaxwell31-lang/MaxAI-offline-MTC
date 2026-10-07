@@ -175,8 +175,11 @@ class AutomaticModelDownloadService extends GetxService {
         (_) => unawaited(_reconcileDownloadCompletion()),
       );
     }
+    // Checksumming a 1-2 GB model takes many seconds. Do it after the UI is
+    // up instead of holding the app on the launch screen; the model state
+    // stays "checking" until it finishes.
     final selected = selectedModel;
-    if (selected != null) await inspectModel(selected);
+    if (selected != null) unawaited(inspectModel(selected));
     return this;
   }
 
@@ -233,10 +236,14 @@ class AutomaticModelDownloadService extends GetxService {
           model: model,
         );
       } else {
+        final fileMissing = validation.message == 'Model file is missing.';
         _setForModel(
           model,
           AutomaticModelDownloadState.missing,
-          '${model.name} is not downloaded yet.',
+          fileMissing
+              ? '${model.name} is not downloaded yet.'
+              : '${model.name} failed validation.',
+          failure: fileMissing ? '' : validation.message,
         );
       }
     } catch (error) {

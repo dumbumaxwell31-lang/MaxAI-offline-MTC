@@ -100,7 +100,11 @@ class DownloadService extends GetxService with WidgetsBindingObserver {
 
           var progress = activeDownloads[filename];
           if (progress == null &&
-              (status == 'Downloading...' ||
+              (status == 'Downloading' ||
+                  status == 'Paused' ||
+                  status == 'Download complete' ||
+                  status.startsWith('Download failed') ||
+                  status == 'Downloading...' ||
                   status == 'Downloading to phone...' ||
                   status.startsWith('Importing'))) {
             progress = DownloadProgress(filename: filename);

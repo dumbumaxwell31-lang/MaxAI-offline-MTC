@@ -19,6 +19,7 @@ class InferenceService extends GetxService {
   final isModelLoaded = false.obs;
   final isGenerating = false.obs;
   final isLoadingModel = false.obs;
+  final isUnloadingModel = false.obs;
   final isVisionLoaded = false.obs;
   final loadingModelName = ''.obs;
   final loadedModelName = ''.obs;
@@ -36,6 +37,9 @@ class InferenceService extends GetxService {
   final loadedBackend = ''.obs;
   final resourceConfigurationNotice = ''.obs;
 
+  /// True while a model is being loaded or unloaded.
+  bool get isModelBusy => isLoadingModel.value || isUnloadingModel.value;
+
   /// Whether the current platform supports local inference.
   bool get supportsLocalInference => platform.supportsLocalInference;
 
@@ -49,14 +53,16 @@ class InferenceService extends GetxService {
     if (!supportsLocalInference) {
       return 'ERROR: Local inference is not available on this platform. Use Cloud mode.';
     }
-    if (isLoadingModel.value) return 'ERROR: Model is already loading.';
+    if (isModelBusy) return 'ERROR: A model is already loading or unloading.';
     if (!modelPath.toLowerCase().endsWith('.gguf')) {
       return 'ERROR: Local inference supports GGUF model files only.';
     }
 
+    // Mark busy before releasing the previous model so the UI shows progress
+    // immediately and repeated taps are ignored.
+    isLoadingModel.value = true;
     try {
-      await unloadModel();
-      isLoadingModel.value = true;
+      await _releaseEngine();
       loadingModelName.value = modelName ?? modelPath.split('/').last;
       modelLoadProgress.value = 0.0;
 
@@ -303,10 +309,22 @@ class InferenceService extends GetxService {
             InferenceResourcePolicy.allocationFailureMessage(e);
       }
       return 'ERROR: Failed to load model — $e';
+    } finally {
+      isLoadingModel.value = false;
     }
   }
 
   Future<void> unloadModel() async {
+    if (isModelBusy) return;
+    isUnloadingModel.value = true;
+    try {
+      await _releaseEngine();
+    } finally {
+      isUnloadingModel.value = false;
+    }
+  }
+
+  Future<void> _releaseEngine() async {
     final engine = _engine;
     _engine = null;
     if (engine != null) {

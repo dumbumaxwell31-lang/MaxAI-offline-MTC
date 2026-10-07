@@ -71,6 +71,14 @@ class AutomaticModelPolicy {
   AutomaticModelPolicy._();
 
   static const proMinimumTotalRamGb = 4.0;
+
+  /// Android reports less RAM than the advertised size (a 6 GB phone reports
+  /// about 5.2 GB, an 8 GB phone about 7.2-7.7 GB). Below this reported value
+  /// the phone is advertised as less than 8 GB, and MaxPro models run very
+  /// slowly because the model does not fit in free memory.
+  static const proComfortableTotalRamGb = 7.0;
+
+  static const proSlowWarning = 'This model will be very slow on your phone.';
   static const temporaryStorageOverheadBytes = 64 * 1024 * 1024;
 
   static const maxliteModel1 = SelectedLocalModel(
@@ -276,6 +284,14 @@ class ModelSelectionService extends GetxService {
     if (!model.requiresProHardware) return true;
     final ram = totalRamGb.value;
     return ram != null && ram.isFinite && ram >= model.minimumTotalRamGb;
+  }
+
+  /// True for MaxPro models on phones with at least 4 GB but less than an
+  /// advertised 8 GB of RAM.
+  bool isSlowOnThisDevice(SelectedLocalModel model) {
+    if (!model.requiresProHardware || !isModelCompatible(model)) return false;
+    final ram = totalRamGb.value!;
+    return ram < AutomaticModelPolicy.proComfortableTotalRamGb;
   }
 
   String compatibilityMessage(SelectedLocalModel model) {

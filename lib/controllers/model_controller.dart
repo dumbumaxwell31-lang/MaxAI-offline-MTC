@@ -68,7 +68,9 @@ class ModelController extends GetxController {
       _download.downloadUpdateSequence,
       (_) => refreshDownloaded(),
     );
-    refreshDownloaded();
+    // Inspect every catalog model once so cards without a file leave the
+    // disabled "Checking" state and offer Download.
+    refreshModelStatuses();
   }
 
   @override
@@ -121,13 +123,41 @@ class ModelController extends GetxController {
     await refreshDownloaded();
   }
 
+  /// Filename of the model a load was requested for, from the tap until the
+  /// load finishes. Lets the UI show progress immediately and ignore re-taps.
+  final pendingModelFilename = ''.obs;
+
+  bool get isModelBusy =>
+      pendingModelFilename.value.isNotEmpty || _inference.isModelBusy;
+
+  /// Load and Unload share one button position. Ignoring taps briefly after
+  /// an action finishes stops a burst of taps from undoing that action.
+  static const _actionCooldown = Duration(seconds: 1);
+  DateTime _actionCooldownUntil = DateTime.fromMillisecondsSinceEpoch(0);
+
+  bool get _inCooldown => DateTime.now().isBefore(_actionCooldownUntil);
+
+  void _startCooldown() {
+    _actionCooldownUntil = DateTime.now().add(_actionCooldown);
+  }
+
   Future<void> loadModel(String filename) async {
     final model = AutomaticModelPolicy.modelForFilename(filename);
     if (model == null) {
       _showStatus('Unsupported Model', 'Choose a supported model in Models.');
       return;
     }
-    if (_inference.isLoadingModel.value) return;
+    if (isModelBusy || _inCooldown) return;
+    pendingModelFilename.value = filename;
+    try {
+      await _loadModel(model);
+    } finally {
+      pendingModelFilename.value = '';
+      _startCooldown();
+    }
+  }
+
+  Future<void> _loadModel(SelectedLocalModel model) async {
     if (!await selectModel(model)) return;
 
     await _downloads.inspectModel(model);
@@ -170,7 +200,14 @@ class ModelController extends GetxController {
     _showStatus('Model Could Not Load', _friendlyLoadMessage(result));
   }
 
-  Future<void> unloadModel() => _inference.unloadModel();
+  Future<void> unloadModel() async {
+    if (isModelBusy || _inCooldown) return;
+    try {
+      await _inference.unloadModel();
+    } finally {
+      _startCooldown();
+    }
+  }
 
   void _showCompatibilityDialog(SelectedLocalModel model) {
     final message = compatibilityMessage(model);

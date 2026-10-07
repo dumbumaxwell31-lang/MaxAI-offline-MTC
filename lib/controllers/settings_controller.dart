@@ -159,10 +159,9 @@ class SettingsController extends GetxController {
     customCloudModel.value =
         _hive.getSetting(AppConstants.keyCustomCloudModel) ?? '';
     _loadCustomCloudProfiles();
-    globalSystemPrompt.value = _hive.getSetting(
-            AppConstants.keyGlobalSystemPrompt,
-            defaultValue: AppConstants.systemPrompt) ??
-        AppConstants.systemPrompt;
+    // The system prompt is fixed. Ignore any custom prompt saved by older
+    // versions so every user gets the built-in MaxAI prompt.
+    globalSystemPrompt.value = AppConstants.systemPrompt;
     temperature.value = _hive.getSetting(AppConstants.keyTemperature,
             defaultValue: AppConstants.defaultTemperature) ??
         AppConstants.defaultTemperature;
@@ -519,19 +518,7 @@ class SettingsController extends GetxController {
         AppConstants.keyCustomCloudProfileIndex, customCloudProfileIndex.value);
   }
 
-  Future<void> setGlobalSystemPrompt(String prompt) async {
-    final normalized =
-        prompt.trim().isEmpty ? AppConstants.systemPrompt : prompt.trim();
-    globalSystemPrompt.value = normalized;
-    globalSystemPromptController.text = normalized;
-    await _hive.setSetting(AppConstants.keyGlobalSystemPrompt, normalized);
-  }
-
   String effectiveSystemPromptForModel(String modelName) {
-    final prompt = globalSystemPrompt.value.trim();
-    final hasCustomPrompt =
-        prompt.isNotEmpty && prompt != AppConstants.systemPrompt;
-    if (hasCustomPrompt) return prompt;
     if (AppConstants.isUncensoredModelName(modelName)) {
       return AppConstants.uncensoredSystemPrompt;
     }

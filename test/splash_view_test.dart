@@ -32,6 +32,7 @@ void main() {
     final heldFrame = tester.widget<RawImage>(imageFinder);
     expect(identical(heldFrame.image, preloadedImage), isTrue);
     expect(tester.getRect(imageFinder), firstFrameBounds);
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 }

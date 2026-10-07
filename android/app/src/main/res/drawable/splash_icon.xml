@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+ launch icon. Android crops it to a circle, so the logo is
+     inset to sit fully inside that circle on the navy background. -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:drawable="@drawable/launch_logo"
+    android:inset="24%" />

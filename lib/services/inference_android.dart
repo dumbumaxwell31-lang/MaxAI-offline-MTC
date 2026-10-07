@@ -28,6 +28,10 @@ class LoadResult {
 
 /// Android inference engine that wraps llama_flutter_android.
 class InferenceEngine {
+  static const _prefillTimeout = Duration(seconds: 240);
+  static const _stallTimeout = Duration(seconds: 60);
+  static const _hardTimeout = Duration(minutes: 15);
+
   LlamaController? _controller;
   StreamSubscription? _subscription;
   StreamSubscription? _loadProgressSub;
@@ -263,11 +267,39 @@ class InferenceEngine {
     }
 
     int tokenCount = 0;
+    int rawTokenCount = 0;
+
+    // Ends a generation that stopped making progress and makes sure the
+    // native side stops too, so it does not keep the CPU and context busy.
+    void abandon(String result) {
+      if (completed) return;
+      finishWithVisibleText(result);
+      unawaited(_controller?.stop().catchError((_) {}));
+    }
+
+    // Any raw token (including hidden Qwen3 thinking tokens) is progress.
+    // Large models on low-RAM phones can take several seconds per token, so
+    // only a long silence counts as a stall. The native side reports onDone
+    // when generation ends normally.
+    void armStallTimer() {
+      _idleTimer?.cancel();
+      _idleTimer = Timer(_stallTimeout, () {
+        print('[Inference] Stall timeout — $tokenCount visible tokens');
+        final partial = buffer.toString();
+        abandon(partial.isEmpty
+            ? 'ERROR: The model stopped responding. Try a smaller model or '
+                'free memory by closing other apps.'
+            : partial);
+      });
+    }
+
     _subscription = stream.listen(
       (token) {
-        if (tokenCount == 0) {
+        if (rawTokenCount == 0) {
           print('[Inference] ✓ FIRST TOKEN received! Prefill done.');
         }
+        rawTokenCount++;
+        armStallTimer();
         final clean = _sanitizeGemmaGarbage(token);
         if (clean.isEmpty) return;
         final visible = thoughtFilter?.add(clean) ?? clean;
@@ -275,11 +307,6 @@ class InferenceEngine {
         buffer.write(visible);
         tokenCount++;
         onToken?.call(visible);
-        _idleTimer?.cancel();
-        _idleTimer = Timer(const Duration(seconds: 5), () {
-          print('[Inference] Idle timeout — $tokenCount tokens');
-          finishWithVisibleText(buffer.toString());
-        });
       },
       onDone: () {
         print('[Inference] Stream onDone — $tokenCount tokens total');
@@ -291,20 +318,20 @@ class InferenceEngine {
       },
     );
 
-    // Prefill timeout
-    _idleTimer = Timer(const Duration(seconds: 60), () {
-      if (tokenCount == 0) {
-        finishWithVisibleText(
-            'ERROR: Model did not respond. Try a smaller model or shorter conversation.');
+    // Prefill timeout: reading the prompt can take minutes for a 4B model
+    // when the phone has little free RAM.
+    _idleTimer = Timer(_prefillTimeout, () {
+      if (rawTokenCount == 0) {
+        abandon('ERROR: Model did not respond. Try a smaller model, a shorter '
+            'conversation, or close other apps to free memory.');
       }
     });
 
-    // Hard timeout
-    Future.delayed(const Duration(seconds: 180), () {
+    // Hard safety limit for a single answer.
+    Future.delayed(_hardTimeout, () {
       if (!completed) {
         final partial = buffer.toString();
-        finishWithVisibleText(
-            partial.isEmpty ? 'ERROR: Generation timed out.' : partial);
+        abandon(partial.isEmpty ? 'ERROR: Generation timed out.' : partial);
       }
     });
 

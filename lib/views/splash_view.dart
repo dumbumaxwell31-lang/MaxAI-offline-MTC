@@ -35,15 +35,35 @@ class _SplashViewState extends State<SplashView> {
     final artwork = SplashArtwork.image;
     return Scaffold(
       backgroundColor: const Color(0xFF0B1F4D),
-      body: SizedBox.expand(
-        child: artwork == null
-            ? Image.asset(SplashArtwork.assetPath, fit: BoxFit.fill)
-            : RawImage(
-                image: artwork,
-                scale: SplashArtwork.scale,
-                fit: BoxFit.fill,
-                filterQuality: FilterQuality.high,
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          artwork == null
+              ? Image.asset(SplashArtwork.assetPath, fit: BoxFit.fill)
+              : RawImage(
+                  image: artwork,
+                  scale: SplashArtwork.scale,
+                  fit: BoxFit.fill,
+                  filterQuality: FilterQuality.high,
+                ),
+          const Align(
+            alignment: Alignment.bottomCenter,
+            child: SafeArea(
+              child: Padding(
+                padding: EdgeInsets.only(bottom: 48),
+                child: SizedBox(
+                  width: 30,
+                  height: 30,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 3,
+                    color: Colors.white,
+                    semanticsLabel: 'Loading MaxAI',
+                  ),
+                ),
               ),
+            ),
+          ),
+        ],
       ),
     );
   }

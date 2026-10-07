@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 import 'package:google_fonts/google_fonts.dart';
+import '../services/app_update_service.dart';
 import '../controllers/settings_controller.dart';
 import '../core/colors.dart';
 import '../core/constants.dart';
@@ -111,27 +112,36 @@ class SettingsView extends GetView<SettingsController> {
                   child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('Applies to local model responses',
+                        Text('Fixed for all local model responses',
                             style: GoogleFonts.inter(
                                 fontSize: 13,
                                 color: Theme.of(context).hintColor)),
                         const SizedBox(height: 10),
-                        TextField(
-                          controller: controller.globalSystemPromptController,
-                          minLines: 3,
-                          maxLines: 6,
-                          style: GoogleFonts.inter(fontSize: 14),
-                          decoration: InputDecoration(
-                            hintText: AppConstants.systemPrompt,
-                            suffixIcon: IconButton(
-                                icon: const Icon(Icons.check_circle_outline,
-                                    size: 20),
-                                onPressed: () =>
-                                    controller.setGlobalSystemPrompt(controller
-                                        .globalSystemPromptController.text)),
+                        // Fixed by the app; users cannot edit it.
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(14),
+                          decoration: BoxDecoration(
+                            color: isDark
+                                ? Colors.white.withValues(alpha: 0.06)
+                                : Colors.black.withValues(alpha: 0.04),
+                            borderRadius: BorderRadius.circular(12),
                           ),
-                          onSubmitted: (v) =>
-                              controller.setGlobalSystemPrompt(v),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  AppConstants.systemPrompt,
+                                  style: GoogleFonts.inter(fontSize: 14),
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              Icon(Icons.lock_outline,
+                                  size: 18,
+                                  color: Theme.of(context).hintColor),
+                            ],
+                          ),
                         ),
                       ]),
                 ),
@@ -195,7 +205,9 @@ class SettingsView extends GetView<SettingsController> {
                 ),
               ],
             ),
-            const SizedBox(height: 18),
+            const SizedBox(height: 10),
+            const _UpdateCheckRow(),
+            const SizedBox(height: 8),
             _aboutSectionTitle(context, 'About MaxAI'),
             Text(
               'MaxAI is an offline-first research application that brings '
@@ -223,7 +235,7 @@ class SettingsView extends GetView<SettingsController> {
                   'rural, and remote communities.',
             ),
             Divider(height: 24, color: dividerColor),
-            _aboutSectionTitle(context, 'Developer & Mentor'),
+            _aboutSectionTitle(context, 'Developer & Mentors'),
             _aboutLabelValue(
               context,
               'Developer',
@@ -235,6 +247,12 @@ class SettingsView extends GetView<SettingsController> {
               'Project Mentor',
               'Michael Dhihwa, CEO of Midlands School of Robotics and Computing '
                   'and Computer Science Lecturer at Mkoba Teachers College.',
+            ),
+            const SizedBox(height: 8),
+            _aboutLabelValue(
+              context,
+              'Project Mentor',
+              'Denva Tabagadza, Computer Science Lecturer.',
             ),
             Divider(height: 24, color: dividerColor),
             _aboutSectionTitle(context, 'Contact Us'),
@@ -767,4 +785,71 @@ class SettingsView extends GetView<SettingsController> {
       : m == ThemeMode.dark
           ? Icons.dark_mode_outlined
           : Icons.brightness_auto_outlined;
+}
+
+class _UpdateCheckRow extends StatelessWidget {
+  const _UpdateCheckRow();
+
+  String _message(AppUpdateService updates) {
+    switch (updates.status.value) {
+      case UpdateCheckStatus.checking:
+        return 'Checking for updates…';
+      case UpdateCheckStatus.upToDate:
+        return 'MaxAI is up to date.';
+      case UpdateCheckStatus.updateAvailable:
+        final version = updates.latestRelease.value?.version;
+        return version == null
+            ? 'An update is available.'
+            : 'MaxAI $version is available.';
+      case UpdateCheckStatus.offline:
+        return 'No internet connection. MaxAI works offline as usual.';
+      case UpdateCheckStatus.failed:
+        return 'Could not check for updates. Try again later.';
+      case UpdateCheckStatus.idle:
+      case UpdateCheckStatus.skipped:
+        return '';
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!Get.isRegistered<AppUpdateService>()) return const SizedBox.shrink();
+    final updates = Get.find<AppUpdateService>();
+    return Obx(() {
+      final checking = updates.status.value == UpdateCheckStatus.checking;
+      final message = _message(updates);
+      final available = updates.latestRelease.value != null;
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Wrap(spacing: 8, runSpacing: 4, children: [
+            OutlinedButton.icon(
+              onPressed: checking
+                  ? null
+                  : () => updates.checkForUpdates(manual: true),
+              icon: checking
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.system_update_outlined, size: 18),
+              label: const Text('Check for updates'),
+            ),
+            if (available && !checking)
+              FilledButton(
+                onPressed: updates.openStoreListing,
+                child: const Text('UPDATE'),
+              ),
+          ]),
+          if (message.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(message,
+                  style: GoogleFonts.inter(
+                      fontSize: 12, color: Theme.of(context).hintColor)),
+            ),
+        ],
+      );
+    });
+  }
 }

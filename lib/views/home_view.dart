@@ -5,6 +5,7 @@ import '../controllers/home_controller.dart';
 import 'chat_view.dart';
 import 'contact_view.dart';
 import 'settings_view.dart';
+import '../widgets/update_banner.dart';
 
 class HomeView extends GetView<HomeController> {
   const HomeView({super.key});
@@ -57,8 +58,13 @@ class HomeView extends GetView<HomeController> {
         }
         return content;
       }),
-      bottomNavigationBar:
-          _isWide ? null : Obx(() => _buildBottomNav(context, isDark)),
+      bottomNavigationBar: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SafeArea(top: false, bottom: _isWide, child: const UpdateBanner()),
+          if (!_isWide) Obx(() => _buildBottomNav(context, isDark)),
+        ],
+      ),
     );
   }
 

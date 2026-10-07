@@ -59,15 +59,26 @@ class AppLogService extends GetxService {
     if (entries.length > 200) {
       entries.removeRange(200, entries.length);
     }
+    // CrashReportingService writes back into this log, so forwarding must not
+    // re-enter. Without this guard one error recursed until the Dart heap was
+    // exhausted and the UI froze on launch (e.g. offline google_fonts errors).
+    if (_forwardingToCrashReporting) return;
     if ((level == 'ERROR' || level == 'WARNING') &&
         Get.isRegistered<CrashReportingService>()) {
-      Get.find<CrashReportingService>().recordNonFatal(
-        details ?? message,
-        reason: message,
-        extra: {'app_log_level': level},
-      );
+      _forwardingToCrashReporting = true;
+      try {
+        Get.find<CrashReportingService>().recordNonFatal(
+          details ?? message,
+          reason: message,
+          extra: {'app_log_level': level},
+        );
+      } finally {
+        _forwardingToCrashReporting = false;
+      }
     }
   }
+
+  bool _forwardingToCrashReporting = false;
 
   List<AppLogEntry> get importantEntries =>
       entries.where((entry) => entry.isImportant).toList();

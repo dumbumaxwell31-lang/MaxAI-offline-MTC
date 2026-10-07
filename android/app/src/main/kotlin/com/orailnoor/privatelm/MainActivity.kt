@@ -1,7 +1,9 @@
 package com.orailnoor.privatelm
 
 import android.app.DownloadManager
+import android.content.ActivityNotFoundException
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
@@ -19,6 +21,7 @@ class MainActivity : FlutterActivity() {
     private val downloadChannelName = "com.maxai/model_download"
     private val mainHandler = Handler(Looper.getMainLooper())
     private val monitoredDownloads = ConcurrentHashMap.newKeySet<Long>()
+    private val finalizingDownloads = ConcurrentHashMap.newKeySet<String>()
     private var downloadChannel: MethodChannel? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -34,6 +37,38 @@ class MainActivity : FlutterActivity() {
                 "getActiveDownloads" -> queryActiveDownloads(result)
                 "getAvailableStorageBytes" -> queryAvailableStorage(call, result)
                 else -> result.notImplemented()
+            }
+        }
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "com.maxai/app_update",
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "openPlayStore" -> result.success(openPlayStoreListing())
+                else -> result.notImplemented()
+            }
+        }
+    }
+
+    /** Opens this app's Google Play page. Updates are installed by Play only. */
+    private fun openPlayStoreListing(): Boolean {
+        val id = packageName
+        val market = Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$id"))
+            .setPackage("com.android.vending")
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val web = Intent(
+            Intent.ACTION_VIEW,
+            Uri.parse("https://play.google.com/store/apps/details?id=$id"),
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        return try {
+            startActivity(market)
+            true
+        } catch (_: ActivityNotFoundException) {
+            try {
+                startActivity(web)
+                true
+            } catch (_: ActivityNotFoundException) {
+                false
             }
         }
     }
@@ -194,14 +229,43 @@ class MainActivity : FlutterActivity() {
         total: Long,
         expectedBytes: Long,
     ) {
+        // The monitor thread and an app-resume reconcile can both observe the
+        // same successful download. Two concurrent copies into the same .part
+        // file can promote a truncated model, so only one finalizer may run.
+        if (!finalizingDownloads.add(filename)) return
+        try {
+            finalizeDownloadLocked(downloadId, filename, modelsDir, downloaded, total, expectedBytes)
+        } finally {
+            finalizingDownloads.remove(filename)
+        }
+    }
+
+    private fun finalizeDownloadLocked(
+        downloadId: Long,
+        filename: String,
+        modelsDir: String,
+        downloaded: Long,
+        total: Long,
+        expectedBytes: Long,
+    ) {
         val target = File(modelsDir, filename)
         val part = File(target.parentFile, "${target.name}.part")
         val backup = File(target.parentFile, "${target.name}.previous")
         try {
             val source = temporaryDownloadFile(filename)
-            if (!source.exists()) throw IllegalStateException("Downloaded temporary file is missing.")
-            if (expectedBytes > 0 && source.length() < expectedBytes * 0.85) {
-                throw IllegalStateException("Downloaded model file is incomplete.")
+            if (!source.exists()) {
+                // Already finalized by an earlier pass.
+                if (target.exists()) {
+                    removeDownload(downloadId)
+                    emitProgress(filename, downloaded, total, "Download complete")
+                    return
+                }
+                throw IllegalStateException("Downloaded temporary file is missing.")
+            }
+            if (expectedBytes > 0 && source.length() != expectedBytes) {
+                throw IllegalStateException(
+                    "Downloaded model file has ${source.length()} bytes, expected $expectedBytes.",
+                )
             }
 
             target.parentFile?.mkdirs()
@@ -211,7 +275,7 @@ class MainActivity : FlutterActivity() {
             source.inputStream().use { input ->
                 part.outputStream().use { output -> input.copyTo(output, 1024 * 1024) }
             }
-            if (expectedBytes > 0 && part.length() < expectedBytes * 0.85) {
+            if (expectedBytes > 0 && part.length() != expectedBytes) {
                 throw IllegalStateException("Temporary model file failed validation.")
             }
 
